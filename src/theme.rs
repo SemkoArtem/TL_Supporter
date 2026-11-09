@@ -30,7 +30,6 @@ pub mod icon {
     pub const PEOPLE: &str = "\u{E716}";
     pub const MORE: &str = "\u{E712}";
     pub const EYE: &str = "\u{E7B3}";
-    pub const EYE_OFF: &str = "\u{ED1A}";
     pub const COPY: &str = "\u{E8C8}";
 }
 
@@ -50,9 +49,15 @@ impl KeyView {
             let first = parts.next().unwrap_or("");
             parts.fold(first.to_string(), |text, _| text + "-••••")
         };
-        ui.add(egui::Label::new(egui::RichText::new(text).strong()).selectable(self.shown));
-        let (eye, hint) = if self.shown { (icon::EYE_OFF, "Сховати ключ") } else { (icon::EYE, "Показати ключ повністю") };
-        if ui.button(eye).on_hover_text(hint).clicked() {
+        let label = ui.add(egui::Label::new(egui::RichText::new(text).strong()).selectable(self.shown));
+        // Reserve the width of the full key so the buttons stay in place when it opens.
+        let full = egui::WidgetText::from(egui::RichText::new(key).strong())
+            .into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Body)
+            .size()
+            .x;
+        ui.add_space((full - label.rect.width()).max(0.0));
+        let hint = if self.shown { "Сховати ключ" } else { "Показати ключ повністю" };
+        if ui.add(egui::Button::new(icon::EYE).selected(self.shown)).on_hover_text(hint).clicked() {
             self.shown = !self.shown;
         }
         if ui.button(icon::COPY).on_hover_text("Скопіювати ключ").clicked() {
