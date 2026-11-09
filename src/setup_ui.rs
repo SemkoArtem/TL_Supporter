@@ -11,6 +11,18 @@ pub const RESTART_FLAG: &str = "restart.flag";
 pub const SETTINGS_TITLE: &str = "Налаштування TL Supporter";
 pub const EXIT_TITLE: &str = "Закрити TL Supporter";
 
+/// What the exit request must contain. The data folder is writable by every user, so an empty
+/// file must not be enough to close the program.
+pub fn exit_token() -> Vec<u8> {
+    let st = model::load_state();
+    secure::sha256(format!("tlsupporter-exit:{}", st.directory.policy.admin_password).as_bytes())
+}
+
+/// Ask the running program to close. Call only after the admin password was checked.
+fn request_exit() {
+    let _ = std::fs::write(crate::util::data_dir().join(EXIT_FLAG), exit_token());
+}
+
 fn options(title: &str, w: f32, h: f32) -> eframe::NativeOptions {
     eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_title(title).with_inner_size([w, h]).with_resizable(false),
@@ -218,6 +230,7 @@ pub fn run_setup(identity: Identity) -> bool {
 
 struct Settings {
     id: String,
+    key: theme::KeyView,
     password: String,
     unlocked: bool,
     error: String,
@@ -242,7 +255,7 @@ impl eframe::App for Settings {
                 ui.label(st.directory.group_name(&me.group));
                 ui.end_row();
                 ui.label("Ключ ПК:");
-                ui.label(&self.id);
+                ui.horizontal(|ui| self.key.show(ui, &self.id));
                 ui.end_row();
                 ui.label("Стан:");
                 ui.label(match me.state {
@@ -285,12 +298,12 @@ impl eframe::App for Settings {
                     }
                 }
                 if ui.button("Вийти з програми до наступного входу в Windows").clicked() {
-                    let _ = std::fs::write(crate::util::data_dir().join(EXIT_FLAG), b"1");
+                    request_exit();
                     self.message = "Програму буде закрито.".into();
                 }
                 if ui.button("Видалити цей ПК із програми (скинути)").clicked() {
                     let _ = model::save_state(&LocalState::default());
-                    let _ = std::fs::write(crate::util::data_dir().join(EXIT_FLAG), b"1");
+                    request_exit();
                     self.message = "Дані скинуто, програму буде закрито.".into();
                 }
                 if !self.message.is_empty() {
@@ -335,7 +348,7 @@ impl eframe::App for ExitPrompt {
             });
             if close {
                 if !self.password.is_empty() && secure_check(&model::load_state(), &self.password) {
-                    let _ = std::fs::write(crate::util::data_dir().join(EXIT_FLAG), b"1");
+                    request_exit();
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 } else {
                     self.error = "Невірний пароль".into();
@@ -364,7 +377,7 @@ pub fn run_settings(identity: Identity) {
         options(SETTINGS_TITLE, 460.0, 380.0),
         Box::new(move |cc| {
             theme::apply(&cc.egui_ctx);
-            Ok(Box::new(Settings { id: identity.id, password: String::new(), unlocked: false, error: String::new(), message: String::new() }))
+            Ok(Box::new(Settings { id: identity.id, key: Default::default(), password: String::new(), unlocked: false, error: String::new(), message: String::new() }))
         }),
     );
 }

@@ -29,6 +29,41 @@ pub mod icon {
     pub const MINI: &str = "\u{E73F}";
     pub const PEOPLE: &str = "\u{E716}";
     pub const MORE: &str = "\u{E712}";
+    pub const EYE: &str = "\u{E7B3}";
+    pub const EYE_OFF: &str = "\u{ED1A}";
+    pub const COPY: &str = "\u{E8C8}";
+}
+
+/// This PC's key: only the first part is visible until the eye is pressed.
+#[derive(Default)]
+pub struct KeyView {
+    shown: bool,
+    copied: Option<std::time::Instant>,
+}
+
+impl KeyView {
+    pub fn show(&mut self, ui: &mut egui::Ui, key: &str) {
+        let text = if self.shown {
+            key.to_string()
+        } else {
+            let mut parts = key.split('-');
+            let first = parts.next().unwrap_or("");
+            parts.fold(first.to_string(), |text, _| text + "-••••")
+        };
+        ui.add(egui::Label::new(egui::RichText::new(text).strong()).selectable(self.shown));
+        let (eye, hint) = if self.shown { (icon::EYE_OFF, "Сховати ключ") } else { (icon::EYE, "Показати ключ повністю") };
+        if ui.button(eye).on_hover_text(hint).clicked() {
+            self.shown = !self.shown;
+        }
+        if ui.button(icon::COPY).on_hover_text("Скопіювати ключ").clicked() {
+            ui.output_mut(|o| o.copied_text = key.to_string());
+            self.copied = Some(std::time::Instant::now());
+        }
+        if self.copied.is_some_and(|t| t.elapsed().as_secs() < 2) {
+            ui.weak("Скопійовано");
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+        }
+    }
 }
 
 fn load_font(fonts: &mut FontDefinitions, name: &str, path: &str) -> bool {

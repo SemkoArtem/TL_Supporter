@@ -80,9 +80,12 @@ fn watch_exit_flag() {
         loop {
             std::thread::sleep(std::time::Duration::from_secs(1));
             if exit.exists() {
+                let request = std::fs::read(&exit).unwrap_or_default();
                 let _ = std::fs::remove_file(&exit);
-                // The service then leaves the program closed until the next sign-in.
-                std::process::exit(service::EXIT_STOPPED as i32);
+                if request == setup_ui::exit_token() {
+                    // The service then leaves the program closed until the next sign-in.
+                    std::process::exit(service::EXIT_STOPPED as i32);
+                }
             }
             if restart.exists() {
                 let _ = std::fs::remove_file(&restart);

@@ -94,6 +94,7 @@ pub struct LeadApp {
     locked: bool,
     unlock_input: String,
     back_from_tray: bool,
+    key_view: theme::KeyView,
     unlock_error: bool,
     last_tick: std::time::SystemTime,
     was_win_locked: bool,
@@ -130,6 +131,7 @@ impl LeadApp {
             locked: false,
             unlock_input: String::new(),
             back_from_tray: false,
+            key_view: Default::default(),
             unlock_error: false,
             last_tick: std::time::SystemTime::now(),
             was_win_locked: false,
@@ -467,6 +469,12 @@ impl LeadApp {
         let grid_view = self.node.state.read().lead.grid_view;
         self.node.lead_set_thumbs(grid_view);
         egui::CentralPanel::default().show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Ключ цього ПК:");
+                let key = self.node.identity.id.clone();
+                self.key_view.show(ui, &key);
+            });
+            ui.add_space(6.0);
             ui.horizontal(|ui| {
                 ui.add(egui::TextEdit::singleline(&mut self.search).desired_width(240.0).hint_text("Пошук за іменем"));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
