@@ -79,6 +79,19 @@ pub struct JoinCode {
     pub expires_ms: i64,
 }
 
+/// A code typed by a lead on the main screen. The new PC is first only found and shown,
+/// and it joins after the lead has chosen a group.
+#[derive(Clone, Default)]
+pub struct AddCheck {
+    pub code: String,
+    pub expires_ms: i64,
+    pub found_id: String,
+    pub found_name: String,
+    pub group: Option<String>,
+    pub added: bool,
+    pub dismissed: bool,
+}
+
 pub struct Node {
     pub identity: Identity,
     pub state: RwLock<LocalState>,
@@ -89,6 +102,7 @@ pub struct Node {
     pub seen: Mutex<HashMap<String, Seen>>,
     pub dialing: Mutex<HashSet<String>>,
     pub join_codes: Mutex<Vec<JoinCode>>,
+    pub add_check: Mutex<Option<AddCheck>>,
     pub secure_peers: Mutex<HashMap<String, Arc<Peer>>>,
     pub secure_dialing: Mutex<HashSet<String>>,
     pub hub: Arc<CaptureHub>,
@@ -116,6 +130,67 @@ impl Node {
     }
 
     /// Reopen this PC as an employee's PC. Returning needs the team admin password.
+    pub fn factory_reset(&self) -> ! {
+        // Cleared in memory too, so that no later save brings the old team back.
+        *self.state.write() = LocalState::default();
+        if let Err(e) = model::factory_reset() {
+            crate::logi!("factory reset failed: {e}");
+        }
+        crate::service::restart_program()
+    }
+
+    /// Start looking for a new PC that shows this code.
+    pub fn lead_check_code(&self, code: &str) {
+        *self.add_check.lock() = Some(AddCheck { code: code.trim().to_string(), expires_ms: now_ms() + 30_000, ..Default::default() });
+    }
+
+    pub fn lead_check_view(&self) -> Option<AddCheck> {
+        self.add_check.lock().clone().filter(|c| !c.dismissed)
+    }
+
+    /// The lead has seen which PC was found and chosen its group.
+    pub fn lead_add_checked(&self, group: String) {
+        if let Some(c) = self.add_check.lock().as_mut() {
+            c.group = Some(group);
+            c.expires_ms = now_ms() + 2 * 60_000;
+        }
+    }
+
+    pub fn lead_check_cancel(&self) {
+        let mut guard = self.add_check.lock();
+        if guard.as_ref().is_some_and(|c| c.added) {
+            // Stays active for a moment: the reply to the new PC may have been lost.
+            if let Some(c) = guard.as_mut() {
+                c.dismissed = true;
+            }
+        } else {
+            *guard = None;
+        }
+    }
+
+    /// A join request for the code typed on the main screen. `None` means another code,
+    /// `Some(None)` means wait for the lead, otherwise the PC may join this group.
+    fn held_join(self: &Arc<Self>, tag: &str, id: &str, public_b64: &str, name: &str, mac: &[u8]) -> Option<Option<(String, String)>> {
+        let result = {
+            let mut guard = self.add_check.lock();
+            let c = guard.as_mut()?;
+            if c.expires_ms < now_ms() || net::code_tag(&c.code) != tag || net::join_mac(&c.code, id, public_b64, name) != mac {
+                return None;
+            }
+            if !c.found_id.is_empty() && c.found_id != id {
+                return Some(None);
+            }
+            if c.found_id.is_empty() {
+                c.found_id = id.to_string();
+                c.expires_ms = now_ms() + 10 * 60_000;
+            }
+            c.found_name = name.to_string();
+            c.group.clone().map(|g| (c.code.clone(), g))
+        };
+        request_repaint(self);
+        Some(result)
+    }
+
     pub fn switch_to_employee_mode(self: &Arc<Self>) -> ! {
         self.audit_log("—", "Перехід у режим працівника");
         self.state.write().work_as_agent = true;
@@ -704,7 +779,18 @@ impl Node {
         if !self.is_lead() {
             return;
         }
-        let (code, role, group) = {
+        let Ok(public) = secure::unb64(&public_b64) else { return };
+        if secure::device_id(&public) != id {
+            return;
+        }
+        let held = self.held_join(&tag, &id, &public_b64, &name, &mac);
+        if matches!(held, Some(None)) {
+            return;
+        }
+        let checked = held.is_some();
+        let (code, role, group) = if let Some(Some((code, group))) = held {
+            (code, Role::Agent, group)
+        } else {
             let mut codes = self.join_codes.lock();
             codes.retain(|c| c.expires_ms > now_ms());
             let Some(pos) = codes.iter().position(|c| net::code_tag(&c.code) == tag) else { return };
@@ -714,27 +800,34 @@ impl Node {
             let c = codes.remove(pos); // one-time
             (c.code, c.role, c.group)
         };
-        let Ok(public) = secure::unb64(&public_b64) else { return };
-        if secure::device_id(&public) != id {
-            return;
+        // A checked code answers repeated requests, because a UDP reply can get lost.
+        let known = checked && self.state.read().directory.member(&id).is_some_and(|m| m.state == MemberState::Approved);
+        if !known {
+            let (nid, pb, nm, gr) = (id.clone(), public_b64, name.clone(), group);
+            self.update_directory(|d, me| {
+                d.members.insert(
+                    nid.clone(),
+                    Member {
+                        id: nid.clone(),
+                        public_b64: pb,
+                        name: nm,
+                        role,
+                        // The lead has already seen and accepted a checked PC.
+                        state: if role == Role::Lead || checked { MemberState::Approved } else { MemberState::Pending },
+                        group: gr,
+                        rev: Rev::new(me),
+                        ..Default::default()
+                    },
+                );
+            });
+            self.audit_log(&name, "Додано новий ПК за кодом");
         }
-        let (nid, pb, nm, gr) = (id.clone(), public_b64, name.clone(), group);
-        self.update_directory(|d, me| {
-            d.members.insert(
-                nid.clone(),
-                Member {
-                    id: nid.clone(),
-                    public_b64: pb,
-                    name: nm,
-                    role,
-                    state: if role == Role::Lead { MemberState::Approved } else { MemberState::Pending },
-                    group: gr,
-                    rev: Rev::new(me),
-                    ..Default::default()
-                },
-            );
-        });
-        self.audit_log(&name, "Додано новий ПК за кодом");
+        if checked {
+            if let Some(c) = self.add_check.lock().as_mut() {
+                c.added = true;
+            }
+            request_repaint(self);
+        }
         let dir = self.state.read().directory.clone();
         let send_dir = if role == Role::Lead { dir } else { dir.for_agent() };
         let Ok(json) = serde_json::to_vec(&send_dir) else { return };
@@ -814,6 +907,7 @@ pub fn start(identity: Identity, state: LocalState, ui: crate::agent_ui::UiHandl
             seen: Mutex::new(HashMap::new()),
             dialing: Mutex::new(HashSet::new()),
             join_codes: Mutex::new(Vec::new()),
+            add_check: Mutex::new(None),
             secure_peers: Mutex::new(HashMap::new()),
             secure_dialing: Mutex::new(HashSet::new()),
             hub: Arc::new(CaptureHub::new(false)),
@@ -837,6 +931,11 @@ pub fn start(identity: Identity, state: LocalState, ui: crate::agent_ui::UiHandl
 
 /// Used by the first-run window: ask a lead on the network to accept this PC by code.
 pub fn join_with_code(identity: &Identity, code: &str, name: &str) -> Result<Directory> {
+    try_join(identity, code, name, 8)
+}
+
+/// Each round takes about two seconds when no lead answers.
+pub fn try_join(identity: &Identity, code: &str, name: &str, rounds: u32) -> Result<Directory> {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     runtime.block_on(async {
         let socket = UdpSocket::bind(("0.0.0.0", 0)).await?;
@@ -855,7 +954,7 @@ pub fn join_with_code(identity: &Identity, code: &str, name: &str) -> Result<Dir
         let mut targets = net::broadcast_targets(cfg.discovery_port);
         targets.extend(cfg.extra_peers.iter().copied());
         let mut buf = vec![0u8; 65535];
-        for _ in 0..8 {
+        for _ in 0..rounds {
             for t in &targets {
                 let _ = socket.send_to(&bytes, t).await;
             }

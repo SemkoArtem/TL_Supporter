@@ -5,6 +5,9 @@ use crate::node;
 use crate::secure::{self, Identity};
 use crate::theme;
 use eframe::egui::{self, RichText};
+use parking_lot::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 pub const EXIT_FLAG: &str = "exit.flag";
 pub const RESTART_FLAG: &str = "restart.flag";
@@ -54,6 +57,23 @@ struct Setup {
     preset_password: String,
     error: String,
     done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    own_code: String,
+    shown_name: Arc<Mutex<String>>,
+    joined: Arc<Mutex<Option<Directory>>>,
+}
+
+/// Keep offering this PC to the network until a lead types its code.
+fn wait_for_lead(identity: Identity, code: String, name: Arc<Mutex<String>>, joined: Arc<Mutex<Option<Directory>>>, stop: Arc<AtomicBool>) {
+    std::thread::spawn(move || {
+        while !stop.load(Ordering::SeqCst) {
+            let shown = name.lock().clone();
+            if let Ok(directory) = node::try_join(&identity, &code, &shown, 1) {
+                *joined.lock() = Some(directory);
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    });
 }
 
 impl Setup {
@@ -132,6 +152,14 @@ pub fn state_from_preset(identity: &Identity, path: &std::path::Path, password: 
 
 impl eframe::App for Setup {
     fn update(&mut self, ctx: &egui::Context, _f: &mut eframe::Frame) {
+        ctx.request_repaint_after(std::time::Duration::from_millis(400));
+        let typed = self.name.trim().to_string();
+        let display = if typed.is_empty() { std::env::var("COMPUTERNAME").unwrap_or_else(|_| self.identity.id.clone()) } else { typed };
+        *self.shown_name.lock() = display.clone();
+        let joined = self.joined.lock().take();
+        if let Some(directory) = joined {
+            self.finish(LocalState { display_name: display, directory, ..Default::default() }, ctx);
+        }
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("TL Supporter");
             ui.add_space(4.0);
@@ -142,6 +170,10 @@ impl eframe::App for Setup {
             ui.add_space(10.0);
             match self.mode {
                 Mode::Choose => {
+                    ui.label("Код для підключення:");
+                    ui.label(RichText::new(&self.own_code).size(26.0).strong());
+                    ui.weak("Керівник вводить цей код на головному екрані. Чекаю на підключення…");
+                    ui.add_space(8.0);
                     if ui.button("Приєднатись за кодом від керівника").clicked() {
                         self.mode = Mode::Join;
                     }
@@ -210,9 +242,15 @@ pub fn run_setup(identity: Identity) -> bool {
     let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let flag = done.clone();
     let name = std::env::var("USERNAME").unwrap_or_default();
+    let own_code = secure::generate_join_code();
+    let shown_name = Arc::new(Mutex::new(name.clone()));
+    let joined = Arc::new(Mutex::new(None));
+    let stop = Arc::new(AtomicBool::new(false));
+    wait_for_lead(identity.clone(), own_code.clone(), shown_name.clone(), joined.clone(), stop.clone());
+    let (code_for_ui, name_for_ui, joined_for_ui) = (own_code, shown_name, joined);
     let _ = eframe::run_native(
         "TL Supporter",
-        options("TL Supporter", 460.0, 380.0),
+        options("TL Supporter", 460.0, 440.0),
         Box::new(move |cc| {
             theme::apply(&cc.egui_ctx, model::load_state().lead.light_theme);
             Ok(Box::new(Setup {
@@ -226,15 +264,20 @@ pub fn run_setup(identity: Identity) -> bool {
                 preset_password: String::new(),
                 error: String::new(),
                 done: flag,
+                own_code: code_for_ui,
+                shown_name: name_for_ui,
+                joined: joined_for_ui,
             }))
         }),
     );
-    done.load(std::sync::atomic::Ordering::SeqCst)
+    stop.store(true, Ordering::SeqCst);
+    done.load(Ordering::SeqCst)
 }
 
 struct Settings {
     id: String,
     key: theme::KeyView,
+    confirm_reset: bool,
     password: String,
     unlocked: bool,
     error: String,
@@ -305,10 +348,21 @@ impl eframe::App for Settings {
                     request_exit();
                     self.message = "Програму буде закрито.".into();
                 }
-                if ui.button("Видалити цей ПК із програми (скинути)").clicked() {
-                    let _ = model::save_state(&LocalState::default());
-                    request_exit();
-                    self.message = "Дані скинуто, програму буде закрито.".into();
+                if self.confirm_reset {
+                    ui.label("Видалити команду і всі налаштування на цьому ПК?");
+                    ui.horizontal(|ui| {
+                        if ui.button("Так, скинути").clicked() {
+                            let _ = model::factory_reset();
+                            let _ = std::fs::write(crate::util::data_dir().join(RESTART_FLAG), b"1");
+                            self.confirm_reset = false;
+                            self.message = "Дані скинуто, зараз відкриється початкове вікно.".into();
+                        }
+                        if ui.button("Скасувати").clicked() {
+                            self.confirm_reset = false;
+                        }
+                    });
+                } else if ui.button("Скинути до заводських налаштувань").clicked() {
+                    self.confirm_reset = true;
                 }
                 if !self.message.is_empty() {
                     ui.label(&self.message);
@@ -378,10 +432,10 @@ pub fn run_exit_prompt() {
 pub fn run_settings(identity: Identity) {
     let _ = eframe::run_native(
         "TL Supporter",
-        options(SETTINGS_TITLE, 460.0, 380.0),
+        options(SETTINGS_TITLE, 460.0, 420.0),
         Box::new(move |cc| {
             theme::apply(&cc.egui_ctx, model::load_state().lead.light_theme);
-            Ok(Box::new(Settings { id: identity.id, key: Default::default(), password: String::new(), unlocked: false, error: String::new(), message: String::new() }))
+            Ok(Box::new(Settings { id: identity.id, key: Default::default(), confirm_reset: false, password: String::new(), unlocked: false, error: String::new(), message: String::new() }))
         }),
     );
 }

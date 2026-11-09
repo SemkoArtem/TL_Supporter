@@ -261,11 +261,14 @@ unsafe extern "system" fn panel_proc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> L
 unsafe extern "system" fn tray_proc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     if m == WM_TRAY {
         let code = (l.0 & 0xFFFF) as u32;
-        if code == WM_RBUTTONUP || code == WM_CONTEXTMENU {
+        if code == WM_RBUTTONUP {
             push_event(Ev::TrayMenu);
-        } else if code == WM_LBUTTONDBLCLK {
+        } else if code == WM_LBUTTONUP {
             push_event(Ev::TrayOpen);
         }
+        // The shell delivers this without the message queue, so GetMessage would not return
+        // and the click would wait for some later, unrelated message.
+        let _ = PostMessageW(h, WM_WAKE, WPARAM(0), LPARAM(0));
         return LRESULT(0);
     }
     DefWindowProcW(h, m, w, l)
@@ -345,7 +348,10 @@ fn tray_icon(rgb: [u8; 3]) -> HICON {
 
 /// Bring the lead console to the front.
 pub fn restore_console_window() {
-    restore_window(CONSOLE_TITLE);
+    match own_console_window() {
+        Some(h) => bring_up(h),
+        None => restore_window(CONSOLE_TITLE),
+    }
 }
 
 /// Show a window of this program and bring it to the front.
@@ -353,10 +359,16 @@ pub fn restore_window(title: &str) {
     let title = wide(title);
     unsafe {
         if let Ok(h) = FindWindowW(None, PCWSTR(title.as_ptr())) {
-            // SW_RESTORE would turn a maximized window that was only hidden into a smaller one.
-            let _ = ShowWindow(h, if IsIconic(h).as_bool() { SW_RESTORE } else { SW_SHOW });
-            let _ = SetForegroundWindow(h);
+            bring_up(h);
         }
+    }
+}
+
+fn bring_up(h: HWND) {
+    unsafe {
+        // SW_RESTORE would turn a maximized window that was only hidden into a smaller one.
+        let _ = ShowWindow(h, if IsIconic(h).as_bool() { SW_RESTORE } else { SW_SHOW });
+        let _ = SetForegroundWindow(h);
     }
 }
 
@@ -876,21 +888,30 @@ impl Ui {
         unsafe {
             let Ok(menu) = CreatePopupMenu() else { return };
             if self.is_lead_pc {
-                let _ = AppendMenuW(menu, MF_STRING, 1, w!("Відкрити консоль"));
+                let _ = AppendMenuW(menu, MF_STRING, 1, w!("Розгорнути"));
+            } else {
+                let _ = AppendMenuW(menu, MF_STRING, 2, w!("Потрібна допомога"));
             }
-            let _ = AppendMenuW(menu, MF_STRING, 2, w!("Потрібна допомога"));
             let _ = AppendMenuW(menu, MF_STRING, 3, w!("Налаштування…"));
+            let _ = AppendMenuW(menu, MF_STRING, 5, w!("Перезапустити"));
+            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
             let _ = AppendMenuW(menu, MF_STRING, 4, w!("Закрити програму…"));
             let mut p = POINT::default();
             let _ = GetCursorPos(&mut p);
+            // Without the foreground window a click elsewhere would not close the menu.
             let _ = SetForegroundWindow(self.tray_hwnd);
-            let cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY, p.x, p.y, 0, self.tray_hwnd, None);
+            let cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON | TPM_BOTTOMALIGN, p.x, p.y, 0, self.tray_hwnd, None);
+            let _ = PostMessageW(self.tray_hwnd, WM_NULL, WPARAM(0), LPARAM(0));
             let _ = DestroyMenu(menu);
             match cmd.0 {
                 1 => restore_console_window(),
                 2 => self.node.agent_request_help(String::new()),
                 3 => open_settings_process(),
                 4 => open_exit_prompt(),
+                5 => {
+                    let _ = Shell_NotifyIconW(NIM_DELETE, &self.tray_data);
+                    crate::service::restart_program();
+                }
                 _ => {}
             }
         }

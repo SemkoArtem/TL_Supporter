@@ -62,6 +62,9 @@ struct SettingsDraft {
     new_admin_pw: String,
     confirm_employee_mode: bool,
     exit_pw: String,
+    reset_pw: String,
+    add_code: String,
+    add_group: String,
     new_group: String,
     new_set: String,
     phrase_edit: HashMap<String, String>,
@@ -529,6 +532,7 @@ impl LeadApp {
                 let key = self.node.identity.id.clone();
                 self.key_view.show(ui, &key);
             });
+            self.add_by_code(ui);
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 ui.add(egui::TextEdit::singleline(&mut self.search).desired_width(240.0).hint_text("Пошук за іменем"));
@@ -545,6 +549,9 @@ impl LeadApp {
             egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
                 self.pending_section(ui);
                 let groups = self.visible_groups();
+                if groups.is_empty() {
+                    ui.weak("Поки немає жодного ПК. Запусти програму на новому ПК, вона покаже код. Введи його вище.");
+                }
                 for (gid, gname, members) in groups {
                     let online = members.iter().filter(|m| self.node.peer(m).is_some()).count();
                     egui::CollapsingHeader::new(RichText::new(format!("{gname}   {online}/{}", members.len())).strong())
@@ -589,6 +596,61 @@ impl LeadApp {
             .collect();
         out.sort_by(|a, b| a.1.cmp(&b.1));
         out
+    }
+
+    /// Add a new PC by the code it shows: find it first, then choose its group.
+    fn add_by_code(&mut self, ui: &mut egui::Ui) {
+        let check = self.node.lead_check_view();
+        ui.horizontal(|ui| {
+            ui.label("Додати ПК за кодом:");
+            let field = ui.add(egui::TextEdit::singleline(&mut self.draft.add_code).desired_width(170.0).hint_text("Код із нового ПК"));
+            let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if (ui.add(theme::accent_button("Перевірити")).clicked() || enter) && !self.draft.add_code.trim().is_empty() {
+                self.node.lead_check_code(&self.draft.add_code);
+                self.draft.add_group = self.group_options().get(1).map(|g| g.0.clone()).unwrap_or_default();
+            }
+        });
+        let Some(c) = check else { return };
+        let opts = self.group_options();
+        let group_name = |id: &str| opts.iter().find(|o| o.0 == id).map(|o| o.1.clone()).unwrap_or_default();
+        if c.added {
+            ui.horizontal(|ui| {
+                ui.label(format!("{} додано в групу «{}».", c.found_name, group_name(c.group.as_deref().unwrap_or(""))));
+                if ui.button("Готово").clicked() {
+                    self.node.lead_check_cancel();
+                    self.draft.add_code.clear();
+                }
+            });
+        } else if c.group.is_some() {
+            ui.weak(format!("Додаю {}…", c.found_name));
+        } else if !c.found_id.is_empty() {
+            ui.horizontal(|ui| {
+                ui.label("Знайдено:");
+                ui.strong(&c.found_name);
+                ui.weak(&c.found_id);
+                let current = group_name(&self.draft.add_group);
+                egui::ComboBox::from_id_salt("add_group").selected_text(current).show_ui(ui, |ui| {
+                    for (id, name) in &opts {
+                        ui.selectable_value(&mut self.draft.add_group, id.clone(), name);
+                    }
+                });
+                if ui.add(theme::accent_button("Додати в групу")).clicked() {
+                    self.node.lead_add_checked(self.draft.add_group.clone());
+                }
+                if ui.button("Скасувати").clicked() {
+                    self.node.lead_check_cancel();
+                }
+            });
+        } else if c.expires_ms < now_ms() {
+            ui.horizontal(|ui| {
+                ui.colored_label(theme::danger(), "ПК з таким кодом не знайдено. Перевір код і чи відкрито на тому ПК початкове вікно програми.");
+                if ui.small_button(icon::CLOSE).clicked() {
+                    self.node.lead_check_cancel();
+                }
+            });
+        } else {
+            ui.weak("Шукаю ПК з цим кодом…");
+        }
     }
 
     fn pending_section(&mut self, ui: &mut egui::Ui) {
@@ -1182,6 +1244,20 @@ impl LeadApp {
         } else if ui.button("Перейти в режим працівника").clicked() {
             self.draft.confirm_employee_mode = true;
         }
+        ui.add_space(12.0);
+        ui.heading("Скидання до заводських");
+        ui.weak("Видаляє на цьому ПК команду, список ПК, журнал і всі налаштування. Ключ ПК лишається. Після цього відкриється початкове вікно, де можна приєднатись до іншої команди.");
+        ui.horizontal(|ui| {
+            ui.add(egui::TextEdit::singleline(&mut self.draft.reset_pw).password(true).desired_width(220.0).hint_text("Адмінський пароль"));
+            if ui.button("Скинути").clicked() {
+                let admin = self.node.state.read().directory.policy.admin_password.clone();
+                if !self.draft.reset_pw.is_empty() && secure::check_password(&admin, &self.draft.reset_pw) {
+                    self.node.factory_reset();
+                }
+                self.draft.reset_pw.clear();
+                self.draft.message = "Невірний адмінський пароль.".into();
+            }
+        });
     }
 
     fn settings_mic(&mut self, ui: &mut egui::Ui) {
@@ -1348,7 +1424,7 @@ impl LeadApp {
 
     fn settings_devices(&mut self, ui: &mut egui::Ui) {
         ui.heading("Додати ПК за кодом");
-        ui.weak("Код одноразовий і діє 30 хвилин. Новий ПК працівника треба буде підтвердити у списку.");
+        ui.weak("Простіше ввести код нового ПК на головному екрані. Цей спосіб навпаки: створений тут код вводять на новому ПК. Він одноразовий і діє 30 хвилин, новий ПК працівника треба буде підтвердити у списку.");
         theme::toggle(ui, &mut self.draft.join_role_lead, "Це ПК керівника");
         let opts = self.group_options();
         let current = opts.iter().find(|o| o.0 == self.draft.join_group).map(|o| o.1.clone()).unwrap_or_default();

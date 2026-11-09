@@ -124,6 +124,44 @@ pub fn join(identity: &Identity, code: &str, name: &str) -> Result<()> {
     model::save_state(&LocalState { display_name: name.into(), directory, ..Default::default() })
 }
 
+/// Act as a new PC that shows its own code and waits for a lead.
+pub fn code_wait(identity: &Identity, code: &str, name: &str) -> Result<()> {
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(60) {
+        if let Ok(directory) = crate::node::try_join(identity, code, name, 1) {
+            let me = directory.member(&identity.id).cloned().unwrap_or_default();
+            println!("JOINED team={} state={:?} group_set={} authority_key={}", directory.team_name, me.state, !me.group.is_empty(), !directory.authority_private_b64.is_empty());
+            return model::save_state(&LocalState { display_name: name.into(), directory, ..Default::default() });
+        }
+    }
+    bail!("no lead answered")
+}
+
+/// Act as a lead typing a code on the main screen: find the PC, then add it to a group.
+pub fn code_add(identity: Identity, code: &str) -> Result<()> {
+    let state = model::load_state();
+    let group = state.directory.groups.keys().next().cloned().unwrap_or_default();
+    let (ui, rx) = UiHandle::new();
+    std::thread::spawn(move || while rx.recv().is_ok() {});
+    let node = crate::node::start(identity, state, ui)?;
+    node.lead_check_code("WRONG-CODE");
+    std::thread::sleep(Duration::from_secs(4));
+    println!("WRONG_CODE_FOUND {}", node.lead_check_view().map(|c| !c.found_id.is_empty()).unwrap_or(false));
+    node.lead_check_code(code);
+    let found = wait_for(30, || node.lead_check_view().is_some_and(|c| !c.found_id.is_empty()));
+    let view = node.lead_check_view().unwrap_or_default();
+    println!("FOUND after={found:?} name={}", view.found_name);
+    println!("MEMBER_BEFORE_ADD {}", node.state.read().directory.member(&view.found_id).is_some());
+    node.lead_add_checked(group);
+    let added = wait_for(15, || node.lead_check_view().is_some_and(|c| c.added));
+    println!("ADDED after={added:?}");
+    std::thread::sleep(Duration::from_secs(3));
+    let st = node.state.read();
+    let m = st.directory.member(&view.found_id).cloned().unwrap_or_default();
+    println!("MEMBER role={:?} state={:?} group_set={}", m.role, m.state, !m.group.is_empty());
+    std::process::exit(0);
+}
+
 /// Run a lead without a window, publish a one-time code in a file and report who joined.
 pub fn serve_code(identity: Identity, seconds: u64) -> Result<()> {
     let state = model::load_state();

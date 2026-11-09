@@ -159,6 +159,8 @@ fn real_main() -> Result<()> {
             Some("--dev-join") => return devtest::join(&identity, &args[1], &args[2]),
             Some("--dev-serve-code") => return devtest::serve_code(identity, args[1].parse()?),
             Some("--dev-employee-mode") => return devtest::employee_mode(&args[1]),
+            Some("--dev-code-wait") => return devtest::code_wait(&identity, &args[1], &args[2]),
+            Some("--dev-code-add") => return devtest::code_add(identity, &args[1]),
             _ => {}
         }
     }
@@ -200,6 +202,10 @@ fn real_main() -> Result<()> {
     }
     if model::load_state().directory.is_empty() {
         if !setup_ui::run_setup(identity.clone()) {
+            // Closing the first-run window must not make the service open it again at once.
+            if flag("--from-service") {
+                std::process::exit(service::EXIT_STOPPED as i32);
+            }
             return Ok(());
         }
         // A team is joined from a plain launch, so offer to install the autostart service.

@@ -365,6 +365,13 @@ fn audit_path() -> PathBuf {
     data_dir().join("audit.bin")
 }
 
+/// Forget the team, the journal and all settings. The PC keeps its own key.
+pub fn factory_reset() -> Result<()> {
+    save_state(&LocalState::default())?;
+    let _ = std::fs::remove_file(audit_path());
+    Ok(())
+}
+
 fn save_protected<T: Serialize>(path: PathBuf, value: &T) -> Result<()> {
     let bytes = serde_json::to_vec(value)?;
     let blob = secure::dpapi_protect(&bytes)?;
