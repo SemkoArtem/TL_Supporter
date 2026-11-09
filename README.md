@@ -17,18 +17,18 @@ The program is free of charge, a free license is planned for later.
 ### Features
 
 - List of employees online, as a list or thumbnails, with groups for several teams.
-- Switch on the fly: audio only, eco mode or full screen.
+- Switch on the fly: audio only or the screen in one of four quality levels. A session opens at maximum quality.
 - The lead hears the employee's computer sound and microphone.
 - The lead's microphone runs constantly or as push-to-talk, always starts off, and the employee hears it in both ears.
 - Several leads at once, with the author's name next to each drawing.
-- On-screen drawing: two markers, rectangle, arrow, laser. Drawings gradually fade away.
-- Text hints, sets of ready phrases, a "Need help" button with an optional reason.
+- On-screen drawing: two markers, rectangle, arrow with adjustable size. Frames and arrows appear when the button is released, a right click cancels. The laser is a live pointer that leaves no drawing, and clicks show as short rings.
+- Text hints with Accept, Reject and Ignore, an unread badge and a shared history kept only while the program runs. Sets of ready phrases, a "Need help" button with an optional reason, Do not disturb and muting of a single PC.
 - Mouse and keyboard control that the lead turns on and off at will. The clipboard is shared only on a full connection.
 - Full access on the lock screen, the sign-in screen and administrator windows, as a separate right for each lead.
 - Lead rights, an action journal, console lock and auto-lock, an admin password on the employee's PC.
 - Adding a PC with a one-time code, presets for quick installation, settings backup.
 - Autostart as a Windows service, the employee sees only a tray icon.
-- The close and minimize buttons hide the program to the tray, with no taskbar button. It closes completely only from the tray menu or settings, with the team admin password.
+- The close and minimize buttons hide the program to the tray, with no taskbar button. The close button also ends the open sessions. It closes completely only from the tray menu or settings, with the team admin password.
 - A lead's PC can switch to employee mode and back with the team admin password.
 - Dark Windows 10 style interface with a navigation pane. A light theme is available in the settings.
 - Updates: a lead's PC downloads a signed version from GitHub and distributes it over the local network.
@@ -176,18 +176,18 @@ The "client hears" mode needs a signed virtual microphone driver. Its button in 
 ### Можливості
 
 - Список працівників онлайн, вигляд списком або мініатюрами, групи для кількох команд.
-- Перемикання на льоту: лише звук, економ-режим або повний екран.
+- Перемикання на льоту: лише звук або екран в одній із чотирьох якостей. Сеанс відкривається з максимальною якістю.
 - Керівник чує звук комп'ютера працівника і його мікрофон.
 - Мікрофон керівника працює постійно або як рація, завжди стартує вимкненим, працівник чує його в обох вухах.
 - Кілька керівників одночасно, біля кожного малюнка видно ім'я автора.
-- Малюнки поверх екрана: два маркери, рамка, стрілка, лазер. Малюнки поступово розчиняються.
-- Текстові підказки, набори готових фраз, кнопка «Потрібна допомога» з необов'язковою причиною.
+- Малюнки поверх екрана: два маркери, рамка, стрілка з налаштуванням розміру. Рамка і стрілка з'являються після відпускання кнопки, правий клік скасовує. Лазер це живий вказівник без малюнка, а кліки видно як короткі кільця.
+- Текстові підказки з кнопками «Прийняв», «Відхилив», «Ігнор», значком непрочитаного і спільною історією, що зберігається лише поки працює програма. Набори готових фраз, кнопка «Потрібна допомога» з необов'язковою причиною, режим «Не турбувати» і вимкнення запитів від окремого ПК.
 - Керування мишею і клавіатурою, яке керівник вмикає і вимикає сам. Буфер обміну спільний лише при повному підключенні.
 - Повний доступ на екрані блокування, екрані входу і у вікнах адміністратора, окреме право для кожного керівника.
 - Права керівників, журнал дій, блокування консолі й автоблокування, адмінський пароль на ПК працівника.
 - Додавання ПК за одноразовим кодом, пресети для швидкого встановлення, резервна копія налаштувань.
 - Автозапуск як служба Windows, у працівника лише значок у треї.
-- Хрестик і кнопка згортання ховають програму в трей, без кнопки на панелі задач. Повністю вона закривається лише через меню значка в треї або налаштування, з адмінським паролем команди.
+- Хрестик і кнопка згортання ховають програму в трей, без кнопки на панелі задач. Хрестик ще й завершує відкриті сеанси. Повністю вона закривається лише через меню значка в треї або налаштування, з адмінським паролем команди.
 - ПК керівника можна перевести в режим працівника і повернути назад з адмінським паролем команди.
 - Темний інтерфейс у стилі Windows 10 з панеллю навігації. Світла тема вмикається в налаштуваннях.
 - Оновлення: ПК керівника завантажує підписану версію з GitHub і роздає її в локальній мережі.

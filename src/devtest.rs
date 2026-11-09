@@ -74,7 +74,7 @@ pub fn run_secure_e2e(identity: Identity, lock_file: &str) -> Result<()> {
     }
     println!("NORMAL_LINK {:?}", wait_for(30, || node.peer(&target).is_some()));
     println!("SECURE_LINK {:?}", wait_for(30, || node.secure_peer(&target).is_some()));
-    node.lead_set_mode(&target, Mode { listen: false, screen: ScreenLevel::Full, monitor: 0 });
+    node.lead_set_mode(&target, Mode { listen: false, screen: ScreenLevel::Full, monitor: 0, quality: 0 });
     let has_tiles = |n: &std::sync::Arc<crate::node::Node>| n.lead.lock().targets.get(&target).map(|t| !t.screen.tiles.is_empty()).unwrap_or(false);
     println!("NORMAL_TILES {:?}", wait_for(10, || has_tiles(&node)));
     println!("SECURE_IDLE_WHILE_UNLOCKED {}", node.lead.lock().targets[&target].secure_mode == Mode::default());
@@ -217,7 +217,7 @@ pub fn run_e2e(identity: Identity, seconds: u64) -> Result<()> {
     node.lead_set_voice_target(Some(target.clone()));
     node.lead_set_thumbs(true);
     let started = Instant::now();
-    node.lead_set_mode(&target, Mode { listen: true, screen: ScreenLevel::Full, monitor: 0 });
+    node.lead_set_mode(&target, Mode { listen: true, screen: ScreenLevel::Full, monitor: 0, quality: 0 });
     let mut first_image = None;
     while started.elapsed() < Duration::from_secs(8) {
         if node.lead.lock().targets.get(&target).map(|t| !t.screen.tiles.is_empty()).unwrap_or(false) {
@@ -231,7 +231,7 @@ pub fn run_e2e(identity: Identity, seconds: u64) -> Result<()> {
     let tools = [(Tool::Marker, 0.15f32), (Tool::MarkerSemi, 0.3), (Tool::Rect, 0.45), (Tool::Arrow, 0.6), (Tool::Laser, 0.75)];
     for (tool, x) in tools {
         let id = node.lead_next_draw_id(&target);
-        node.lead_draw(&target, DrawOp::Begin { id, tool, monitor: 0, x, y: 0.3 });
+        node.lead_draw(&target, DrawOp::Begin { id, tool, monitor: 0, x, y: 0.3, width: 0.0, alpha: 0.0 });
         for i in 1..=12 {
             node.lead_draw(&target, DrawOp::Point { id, x: x + i as f32 * 0.008, y: 0.3 + i as f32 * 0.02 });
             std::thread::sleep(Duration::from_millis(25));
@@ -245,7 +245,23 @@ pub fn run_e2e(identity: Identity, seconds: u64) -> Result<()> {
     crate::lead_core::MIC_LATCHED.store(true, std::sync::atomic::Ordering::Relaxed);
     send_test_voice(&node, &target);
     println!("DRAWN_AND_HINT_SENT");
-    std::thread::sleep(Duration::from_secs(seconds));
+    // A moving pointer and clicks, so both can be seen on the employee's screen.
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(seconds) {
+        let t = started.elapsed().as_secs_f32();
+        node.lead_send_pointer(&target, 0, 0.3 + (t * 0.8).sin() * 0.1, 0.5, true, 10.0);
+        if (t * 10.0) as u32 % 10 == 0 {
+            node.lead_send_tap(&target, 0.55, 0.5);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    {
+        let l = node.lead.lock();
+        if let Some(t) = l.targets.get(&target) {
+            println!("HINT_STATES {:?}", t.hints.iter().map(|h| h.state).collect::<Vec<_>>());
+            println!("LAST_AUDIO_AGE_MS {}", crate::util::now_ms() - t.last_audio_ms);
+        }
+    }
     {
         let l = node.lead.lock();
         let t = l.targets.get(&target);
@@ -254,7 +270,7 @@ pub fn run_e2e(identity: Identity, seconds: u64) -> Result<()> {
             println!("THUMB {:?} revs={}", t.thumb.as_ref().map(|x| (x.0, x.1)), t.thumb_rev);
             println!("MONITORS {:?}", t.monitors);
             println!("CONTROL holder_is_me={}", t.control_holder == my_id);
-            println!("HINTS_OPEN {}", t.hints_open.len());
+            println!("HINTS_OPEN {}", t.hints.len());
             println!("CURSOR {:?}", t.cursor);
             println!("LOCKED {}", t.locked);
             println!("ACTIVITY {:?}", t.activity);

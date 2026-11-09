@@ -6,7 +6,7 @@ use audiopus::coder::{Decoder, Encoder};
 use audiopus::{Application, Channels, SampleRate};
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use windows::core::{implement, Interface, IUnknown, HRESULT, PCWSTR};
 use windows::Win32::Foundation::*;
@@ -50,11 +50,83 @@ fn pcm_format(channels: u16) -> WAVEFORMATEX {
     }
 }
 
+/// Devices chosen in the settings: microphone and speakers. Empty means the Windows default.
+static DEVICES: Mutex<(String, String)> = parking_lot::const_mutex((String::new(), String::new()));
+static MIC_LEVEL: AtomicU32 = AtomicU32::new(0);
+static SEND_LOGGED: AtomicBool = AtomicBool::new(false);
+
+pub fn set_devices(mic: &str, speaker: &str) {
+    *DEVICES.lock() = (mic.to_string(), speaker.to_string());
+}
+
+/// Loudest recent sample of the microphone, from 0 to 1.
+pub fn mic_level() -> f32 {
+    MIC_LEVEL.load(Ordering::Relaxed) as f32 / 32768.0
+}
+
+/// Datagrams report failure only here, so the first problem goes to the log.
+pub fn send_voice(c: &quinn::Connection, data: bytes::Bytes) {
+    if let Err(e) = c.send_datagram(data) {
+        if !SEND_LOGGED.swap(true, Ordering::Relaxed) {
+            crate::logi!("audio send failed: {e}");
+        }
+    }
+}
+
+fn device_name(dev: &IMMDevice) -> String {
+    use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
+    unsafe {
+        dev.OpenPropertyStore(STGM_READ)
+            .and_then(|store| store.GetValue(&PKEY_Device_FriendlyName))
+            .map(|v| v.to_string())
+            .unwrap_or_else(|_| "?".to_string())
+    }
+}
+
+/// The device people actually hear and speak into. The separate "communications" role
+/// often points at another device, which sounded like no audio at all.
 fn default_device(flow: EDataFlow) -> Result<IMMDevice> {
     unsafe {
         let e: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
-        Ok(e.GetDefaultAudioEndpoint(flow, eCommunications)?)
+        let chosen = {
+            let d = DEVICES.lock();
+            if flow == eCapture { d.0.clone() } else { d.1.clone() }
+        };
+        if !chosen.is_empty() {
+            let id: Vec<u16> = chosen.encode_utf16().chain(std::iter::once(0)).collect();
+            match e.GetDevice(PCWSTR(id.as_ptr())) {
+                Ok(d) => return Ok(d),
+                Err(err) => crate::logi!("chosen audio device is gone ({err}), using the default"),
+            }
+        }
+        Ok(e.GetDefaultAudioEndpoint(flow, eConsole)?)
     }
+}
+
+fn enumerate(flow: EDataFlow) -> Result<Vec<(String, String)>> {
+    unsafe {
+        let e: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
+        let list = e.EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE)?;
+        let mut out = Vec::new();
+        for i in 0..list.GetCount()? {
+            let dev = list.Item(i)?;
+            let raw = dev.GetId()?;
+            let id = raw.to_string().unwrap_or_default();
+            CoTaskMemFree(Some(raw.0 as *const _));
+            out.push((id, device_name(&dev)));
+        }
+        Ok(out)
+    }
+}
+
+/// Microphones and speakers as (id, name). Runs on its own thread because of COM.
+pub fn list_devices() -> (Vec<(String, String)>, Vec<(String, String)>) {
+    std::thread::spawn(|| {
+        let _com = ComGuard::new();
+        (enumerate(eCapture).unwrap_or_default(), enumerate(eRender).unwrap_or_default())
+    })
+    .join()
+    .unwrap_or_default()
 }
 
 #[implement(IActivateAudioInterfaceCompletionHandler)]
@@ -134,6 +206,7 @@ fn process_loopback_client(format: &WAVEFORMATEX) -> Result<IAudioClient> {
 fn device_client(flow: EDataFlow, extra: u32, format: &WAVEFORMATEX) -> Result<IAudioClient> {
     unsafe {
         let dev = default_device(flow)?;
+        crate::logi!("audio device {}: {}", if flow == eCapture { "input" } else { "output" }, device_name(&dev));
         let client: IAudioClient = dev.Activate(CLSCTX_ALL, None)?;
         client.Initialize(
             AUDCLNT_SHAREMODE_SHARED,
@@ -194,6 +267,7 @@ fn capture_once(kind: CaptureKind, stop: &AtomicBool, on_packet: &mut impl FnMut
             .map_err(|e| anyhow!("opus encoder: {e}"))?;
         let mut pending: Vec<i16> = Vec::with_capacity(FRAME_SAMPLES * 4);
         let mut output = vec![0u8; 1500];
+        let mut heard = false;
         let result = (|| -> Result<()> {
             while !stop.load(Ordering::Relaxed) {
                 if event_ok {
@@ -225,6 +299,14 @@ fn capture_once(kind: CaptureKind, stop: &AtomicBool, on_packet: &mut impl FnMut
                 }
                 while pending.len() >= FRAME_SAMPLES {
                     let frame: Vec<i16> = pending.drain(..FRAME_SAMPLES).collect();
+                    let peak = frame.iter().map(|s| s.unsigned_abs() as u32).max().unwrap_or(0);
+                    if kind == CaptureKind::Microphone {
+                        MIC_LEVEL.store(peak, Ordering::Relaxed);
+                    }
+                    if peak > 30 && !heard {
+                        heard = true;
+                        crate::logi!("audio capture {kind:?}: sound detected");
+                    }
                     // Silence is not sent at all.
                     if frame.iter().any(|s| s.unsigned_abs() > 30) {
                         let n = encoder.encode(&frame, &mut output).map_err(|e| anyhow!("opus: {e}"))?;

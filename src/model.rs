@@ -101,6 +101,8 @@ pub struct Policy {
     pub sound_on_connect: bool,
     pub show_help_button: bool,
     pub update_repo: String,
+    /// How long a new hint stays on the employee's screen. Never less than 10 seconds.
+    pub hint_show_sec: u32,
     pub rev: Rev,
 }
 
@@ -119,6 +121,7 @@ impl Default for Policy {
             sound_on_connect: true,
             show_help_button: true,
             update_repo: String::new(),
+            hint_show_sec: 10,
             rev: Rev::default(),
         }
     }
@@ -311,6 +314,18 @@ pub struct LeadSettings {
     pub mic_mode_client: bool,
     pub personal_phrases: Vec<String>,
     pub light_theme: bool,
+    pub marker_width: f32,
+    pub semi_width: f32,
+    pub semi_alpha: f32,
+    pub rect_width: f32,
+    pub arrow_width: f32,
+    pub pointer_size: f32,
+    /// Empty means the Windows default device.
+    pub mic_device: String,
+    pub speaker_device: String,
+    pub do_not_disturb: bool,
+    /// PCs whose help requests this lead does not want.
+    pub muted_help: Vec<String>,
 }
 
 impl Default for LeadSettings {
@@ -328,6 +343,16 @@ impl Default for LeadSettings {
             mic_mode_client: false,
             personal_phrases: Vec::new(),
             light_theme: false,
+            marker_width: 5.0,
+            semi_width: 22.0,
+            semi_alpha: 0.38,
+            rect_width: 3.0,
+            arrow_width: 4.0,
+            pointer_size: 10.0,
+            mic_device: String::new(),
+            speaker_device: String::new(),
+            do_not_disturb: false,
+            muted_help: Vec::new(),
         }
     }
 }
@@ -344,6 +369,8 @@ pub struct LocalState {
     pub work_as_agent: bool,
     /// The group was assigned only for employee mode, so it is cleared on the way back.
     pub agent_group_auto: bool,
+    /// Leads this lead's PC has allowed to connect. Ordinary employees' PCs do not ask.
+    pub trusted_leads: Vec<String>,
 }
 
 impl LocalState {

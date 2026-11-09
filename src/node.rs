@@ -893,6 +893,7 @@ pub fn start(identity: Identity, state: LocalState, ui: crate::agent_ui::UiHandl
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(3).enable_all().build()?;
     let handle = runtime.handle().clone();
     let cfg = NetConfig::from_env();
+    crate::audio::set_devices(&state.lead.mic_device, &state.lead.speaker_device);
     let is_lead = state.directory.is_approved_lead(&identity.id);
     let node = handle.block_on(async {
         let endpoint = net::create_endpoint(&identity, cfg.quic_port)?;

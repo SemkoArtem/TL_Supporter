@@ -34,6 +34,9 @@ pub enum UiCmd {
     ClearLead(String),
     Activity(Vec<LeadActivity>),
     Hint { lead: String, name: String, color: [u8; 3], id: u32, text: String },
+    Consent { lead: String, name: String },
+    Pointer { lead: String, name: String, color: [u8; 3], monitor: u8, x: f32, y: f32, on: bool, size: f32 },
+    Tap { color: [u8; 3], monitor: u8, x: f32, y: f32 },
     HelpTaken(String),
     HelpSent,
     HelpNoLeads,
@@ -194,8 +197,30 @@ struct DrawItem {
     monitor: u8,
     color: [u8; 3],
     points: Vec<[f32; 2]>,
-    stamps: Vec<Instant>,
     ended: Option<Instant>,
+    width: f32,
+    alpha: f32,
+}
+
+#[derive(Clone)]
+struct PointerMark {
+    lead: String,
+    name: String,
+    color: [u8; 3],
+    monitor: u8,
+    x: f32,
+    y: f32,
+    size: f32,
+    last: Instant,
+}
+
+#[derive(Clone)]
+struct TapMark {
+    color: [u8; 3],
+    monitor: u8,
+    x: f32,
+    y: f32,
+    start: Instant,
 }
 
 struct Overlay {
@@ -212,11 +237,17 @@ struct Hint {
     color: [u8; 3],
     id: u32,
     text: String,
+    /// 0 unread, 1 read, 2 accepted, 3 rejected, 4 ignored.
+    state: u8,
+    /// While set, the hint is shown as a card that appeared at this moment.
+    toast_from: Option<Instant>,
 }
 
 #[derive(Clone)]
 enum Action {
-    CloseHint(usize),
+    Ack(usize, u8),
+    OpenHistory,
+    Consent(usize, bool),
     CopyHint(usize),
     Help,
     HelpReason(String),
@@ -225,7 +256,10 @@ enum Action {
 }
 
 const FADE: Duration = Duration::from_millis(1500);
-const LASER_LIFE: Duration = Duration::from_millis(900);
+const TAP_LIFE: Duration = Duration::from_millis(700);
+const POINTER_LIFE: Duration = Duration::from_secs(2);
+const HINT_SLIDE: Duration = Duration::from_millis(350);
+const HISTORY_ROWS: usize = 6;
 
 thread_local! {
     static EVENTS: RefCell<Vec<Ev>> = const { RefCell::new(Vec::new()) };
@@ -233,6 +267,7 @@ thread_local! {
 
 enum Ev {
     PanelClick(i32, i32),
+    PanelWheel(i32),
     TrayMenu,
     TrayOpen,
 }
@@ -252,6 +287,10 @@ unsafe extern "system" fn panel_proc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> L
             let x = (l.0 & 0xFFFF) as i16 as i32;
             let y = ((l.0 >> 16) & 0xFFFF) as i16 as i32;
             push_event(Ev::PanelClick(x, y));
+            LRESULT(0)
+        }
+        WM_MOUSEWHEEL => {
+            push_event(Ev::PanelWheel(((w.0 >> 16) & 0xFFFF) as i16 as i32));
             LRESULT(0)
         }
         _ => DefWindowProcW(h, m, w, l),
@@ -472,6 +511,13 @@ struct Ui {
     overlays: Vec<Overlay>,
     items: Vec<DrawItem>,
     hints: Vec<Hint>,
+    history_open: bool,
+    history_top: usize,
+    consent: Vec<(String, String)>,
+    pointers: Vec<PointerMark>,
+    taps: Vec<TapMark>,
+    panel_rect: (i32, i32, i32, i32),
+    lbutton_was: bool,
     activity: Vec<LeadActivity>,
     policy: Policy,
     font: Option<Font>,
@@ -527,7 +573,12 @@ impl Ui {
             UiCmd::Draw { lead, name, color, op } => self.on_draw(lead, name, color, op),
             UiCmd::ClearLead(id) => {
                 self.items.retain(|i| i.lead != id);
-                self.hints.retain(|h| h.lead != id);
+                self.pointers.retain(|p| p.lead != id);
+                self.consent.retain(|c| c.0 != id);
+                // The conversation stays readable after the lead has left.
+                for h in self.hints.iter_mut().filter(|h| h.lead == id) {
+                    h.toast_from = None;
+                }
                 self.panel_dirty = true;
             }
             UiCmd::Activity(a) => {
@@ -535,9 +586,28 @@ impl Ui {
                 self.panel_dirty = true;
             }
             UiCmd::Hint { lead, name, color, id, text } => {
-                self.hints.push(Hint { lead, name, color, id, text });
+                let open = self.history_open;
+                if open {
+                    self.node.agent_hint_ack(&lead, id, 1);
+                }
+                self.hints.push(Hint { lead, name, color, id, text, state: u8::from(open), toast_from: (!open).then(Instant::now) });
+                if self.hints.len() > 300 {
+                    self.hints.remove(0);
+                }
                 self.panel_dirty = true;
             }
+            UiCmd::Consent { lead, name } => {
+                self.consent.retain(|c| c.0 != lead);
+                self.consent.push((lead, name));
+                self.panel_dirty = true;
+            }
+            UiCmd::Pointer { lead, name, color, monitor, x, y, on, size } => {
+                self.pointers.retain(|p| p.lead != lead);
+                if on {
+                    self.pointers.push(PointerMark { lead, name, color, monitor, x, y, size, last: Instant::now() });
+                }
+            }
+            UiCmd::Tap { color, monitor, x, y } => self.taps.push(TapMark { color, monitor, x, y, start: Instant::now() }),
             UiCmd::HelpTaken(name) => {
                 self.help_waiting = false;
                 self.status = Some((format!("{name} іде на допомогу"), Instant::now()));
@@ -582,8 +652,8 @@ impl Ui {
     fn on_draw(&mut self, lead: String, name: String, color: [u8; 3], op: DrawOp) {
         let now = Instant::now();
         match op {
-            DrawOp::Begin { id, tool, monitor, x, y } => {
-                self.items.push(DrawItem { lead, name, id, tool, monitor, color, points: vec![[x, y]], stamps: vec![now], ended: None });
+            DrawOp::Begin { id, tool, monitor, x, y, width, alpha } => {
+                self.items.push(DrawItem { lead, name, id, tool, monitor, color, points: vec![[x, y]], ended: None, width, alpha });
             }
             DrawOp::Point { id, x, y } => {
                 if let Some(i) = self.items.iter_mut().rev().find(|i| i.lead == lead && i.id == id) {
@@ -591,7 +661,6 @@ impl Ui {
                         i.points[1] = [x, y];
                     } else {
                         i.points.push([x, y]);
-                        i.stamps.push(now);
                     }
                 }
             }
@@ -600,6 +669,7 @@ impl Ui {
                     i.ended = Some(now);
                 }
             }
+            DrawOp::Cancel { id } => self.items.retain(|i| !(i.lead == lead && i.id == id)),
             DrawOp::ClearMine => self.items.retain(|i| i.lead != lead),
             DrawOp::ClearAll => self.items.clear(),
         }
@@ -645,29 +715,31 @@ impl Ui {
     fn render_overlays(&mut self) {
         let now = Instant::now();
         let fade_total = self.fade_after() + FADE;
-        self.items.retain(|i| match (i.tool, i.ended) {
-            (Tool::Laser, Some(e)) => now.duration_since(e) < LASER_LIFE,
-            (_, Some(e)) => now.duration_since(e) < fade_total,
-            _ => true,
-        });
+        self.items.retain(|i| i.ended.map(|e| now.duration_since(e) < fade_total).unwrap_or(true));
+        self.pointers.retain(|p| now.duration_since(p.last) < POINTER_LIFE);
+        self.taps.retain(|t| now.duration_since(t.start) < TAP_LIFE);
         if let Some(until) = self.hidden_until {
             if now >= until {
                 self.hidden_until = None;
                 self.panel_dirty = true;
             }
         }
-        if self.overlays.is_empty() && self.items.is_empty() {
+        if self.overlays.is_empty() && self.items.is_empty() && self.pointers.is_empty() && self.taps.is_empty() {
             return;
         }
         self.ensure_overlays();
         let hidden = self.hidden_until.is_some();
         let items = self.items.clone();
+        let pointers = self.pointers.clone();
+        let taps = self.taps.clone();
         let alphas: Vec<f32> = items.iter().map(|i| self.item_alpha(i, now)).collect();
         let font = self.font.take();
         for (index, o) in self.overlays.iter_mut().enumerate() {
             let mine: Vec<usize> =
                 (0..items.len()).filter(|i| items[*i].monitor as usize == index && !hidden).collect();
-            if mine.is_empty() {
+            let my_pointers: Vec<&PointerMark> = pointers.iter().filter(|p| p.monitor as usize == index && !hidden).collect();
+            let my_taps: Vec<&TapMark> = taps.iter().filter(|t| t.monitor as usize == index && !hidden).collect();
+            if mine.is_empty() && my_pointers.is_empty() && my_taps.is_empty() {
                 if o.visible {
                     unsafe {
                         let _ = ShowWindow(o.hwnd, SW_HIDE);
@@ -678,7 +750,13 @@ impl Ui {
             }
             o.pix.fill(Color::TRANSPARENT);
             for i in mine {
-                render_item(&mut o.pix, &items[i], alphas[i], now, font.as_ref());
+                render_item(&mut o.pix, &items[i], alphas[i], font.as_ref());
+            }
+            for t in my_taps {
+                render_tap(&mut o.pix, t, now);
+            }
+            for p in my_pointers {
+                render_pointer(&mut o.pix, p, font.as_ref());
             }
             o.dib.present(o.hwnd, o.rect.0, o.rect.1, &o.pix);
             unsafe {
@@ -713,8 +791,39 @@ impl Ui {
         let activity = self.visible_activity();
         let mut height = 0.0f32;
         let hint_lines: Vec<Vec<String>> = self.hints.iter().map(|h| font.wrap(&h.text, body, wrap_w)).collect();
-        for l in &hint_lines {
-            height += 58.0 + l.len() as f32 * 19.0 + 6.0;
+        let now = Instant::now();
+        let hold = self.hint_hold();
+        // Cards still on screen, with how far each has already slid away.
+        let toasts: Vec<(usize, f32)> = if self.history_open {
+            Vec::new()
+        } else {
+            self.hints
+                .iter()
+                .enumerate()
+                .filter_map(|(i, h)| {
+                    let e = now.duration_since(h.toast_from?);
+                    let p = if e <= hold { 0.0 } else { (e - hold).as_secs_f32() / HINT_SLIDE.as_secs_f32() };
+                    Some((i, p.min(1.0) * p.min(1.0) * PANEL_W as f32))
+                })
+                .collect()
+        };
+        let history_range = {
+            let end = self.hints.len() - self.history_top.min(self.hints.len());
+            end.saturating_sub(HISTORY_ROWS)..end
+        };
+        let row_h = |lines: usize, state: u8| 30.0 + lines as f32 * 19.0 + if state <= 1 { 26.0 } else { 0.0 } + 4.0;
+        height += self.consent.len() as f32 * 72.0;
+        for (i, _) in &toasts {
+            height += 62.0 + hint_lines[*i].len() as f32 * 19.0 + 6.0;
+        }
+        if self.history_open {
+            height += 30.0;
+            for i in history_range.clone() {
+                height += row_h(hint_lines[i].len(), self.hints[i].state);
+            }
+        }
+        if !self.hints.is_empty() {
+            height += 32.0;
         }
         if self.status.is_some() {
             height += 36.0;
@@ -756,23 +865,64 @@ impl Ui {
             paint.set_color_rgba8(c[0], c[1], c[2], c[3]);
             pix.fill_rect(r, paint, Transform::identity(), None);
         };
-        for (i, hint) in self.hints.iter().enumerate() {
+        for (i, (_, name)) in self.consent.iter().enumerate() {
+            fill(&mut pix, &mut paint, Rect::from_xywh(0.0, y, PANEL_W as f32, 66.0).unwrap(), [31, 31, 31, 250]);
+            fill(&mut pix, &mut paint, Rect::from_xywh(0.0, y, 5.0, 66.0).unwrap(), [0, 120, 215, 255]);
+            font.draw(&mut pix, &format!("{name} хоче підключитись"), 15.0, y + 22.0, 13.0, [242, 242, 242]);
+            font.draw(&mut pix, "Дозволити", 15.0, y + 52.0, 13.0, [108, 203, 95]);
+            self.actions.push((Rect::from_xywh(10.0, y + 36.0, 90.0, 26.0).unwrap(), Action::Consent(i, true)));
+            font.draw(&mut pix, "Відмовити", 120.0, y + 52.0, 13.0, [255, 120, 130]);
+            self.actions.push((Rect::from_xywh(115.0, y + 36.0, 90.0, 26.0).unwrap(), Action::Consent(i, false)));
+            y += 72.0;
+        }
+        for (i, offset) in &toasts {
+            let (i, x0) = (*i, *offset);
+            let hint = &self.hints[i];
             let lines = &hint_lines[i];
-            let box_h = 58.0 + lines.len() as f32 * 19.0;
-            let bg = Rect::from_xywh(0.0, y, PANEL_W as f32, box_h).unwrap();
+            let box_h = 62.0 + lines.len() as f32 * 19.0;
+            let bg = Rect::from_xywh(x0, y, PANEL_W as f32, box_h).unwrap();
             fill(&mut pix, &mut paint, bg, [31, 31, 31, 245]);
             let c = hint.color;
-            fill(&mut pix, &mut paint, Rect::from_xywh(0.0, y, 5.0, box_h).unwrap(), [c[0], c[1], c[2], 255]);
-            font.draw(&mut pix, &hint.name, 15.0, y + 20.0, 13.0, c);
+            fill(&mut pix, &mut paint, Rect::from_xywh(x0, y, 5.0, box_h).unwrap(), [c[0], c[1], c[2], 255]);
+            font.draw(&mut pix, &hint.name, x0 + 15.0, y + 20.0, 13.0, c);
             for (n, line) in lines.iter().enumerate() {
-                font.draw(&mut pix, line, 15.0, y + 40.0 + n as f32 * 19.0, body, [242, 242, 242]);
+                font.draw(&mut pix, line, x0 + 15.0, y + 40.0 + n as f32 * 19.0, body, [242, 242, 242]);
             }
-            let btn_y = y + box_h - 24.0;
-            font.draw(&mut pix, "Копіювати", 15.0, btn_y + 15.0, 12.0, [96, 205, 255]);
-            self.actions.push((Rect::from_xywh(10.0, btn_y, 80.0, 22.0).unwrap(), Action::CopyHint(i)));
-            font.draw(&mut pix, "Закрити", PANEL_W as f32 - 62.0, btn_y + 15.0, 12.0, [96, 205, 255]);
-            self.actions.push((Rect::from_xywh(PANEL_W as f32 - 70.0, btn_y, 65.0, 22.0).unwrap(), Action::CloseHint(i)));
+            draw_ack_row(&font, &mut pix, &mut self.actions, x0, y + box_h - 24.0, i);
             y += box_h + 6.0;
+        }
+        if self.history_open {
+            fill(&mut pix, &mut paint, Rect::from_xywh(0.0, y, PANEL_W as f32, 30.0).unwrap(), [51, 51, 51, 250]);
+            font.draw(&mut pix, "Підказки", 12.0, y + 20.0, 13.0, [242, 242, 242]);
+            if self.hints.len() > HISTORY_ROWS {
+                font.draw(&mut pix, "коліщатком вгору: старіші", 118.0, y + 20.0, 11.0, [170, 170, 170]);
+            }
+            y += 30.0;
+            for i in history_range {
+                let hint = &self.hints[i];
+                let lines = &hint_lines[i];
+                let box_h = row_h(lines.len(), hint.state) - 4.0;
+                fill(&mut pix, &mut paint, Rect::from_xywh(0.0, y, PANEL_W as f32, box_h).unwrap(), [31, 31, 31, 250]);
+                let c = hint.color;
+                fill(&mut pix, &mut paint, Rect::from_xywh(0.0, y, 5.0, box_h).unwrap(), [c[0], c[1], c[2], 255]);
+                font.draw(&mut pix, &hint.name, 15.0, y + 20.0, 13.0, c);
+                let (label, color) = match hint.state {
+                    0 => ("Нове", [255, 120, 130]),
+                    2 => ("Прийнято", [108, 203, 95]),
+                    3 => ("Відхилено", [255, 120, 130]),
+                    4 => ("Ігнор", [170, 170, 170]),
+                    _ => ("Прочитано", [170, 170, 170]),
+                };
+                let tw = font.width(label, 12.0);
+                font.draw(&mut pix, label, PANEL_W as f32 - tw - 10.0, y + 20.0, 12.0, color);
+                for (n, line) in lines.iter().enumerate() {
+                    font.draw(&mut pix, line, 15.0, y + 40.0 + n as f32 * 19.0, body, [242, 242, 242]);
+                }
+                if hint.state <= 1 {
+                    draw_ack_row(&font, &mut pix, &mut self.actions, 0.0, y + box_h - 24.0, i);
+                }
+                y += box_h + 4.0;
+            }
         }
         if let Some((text, _)) = &self.status {
             fill(&mut pix, &mut paint, Rect::from_xywh(0.0, y, PANEL_W as f32, 32.0).unwrap(), [30, 30, 30, 235]);
@@ -816,6 +966,22 @@ impl Ui {
             self.actions.push((Rect::from_xywh(0.0, y, PANEL_W as f32, 28.0).unwrap(), Action::HelpCancel));
             y += 32.0;
         }
+        if !self.hints.is_empty() {
+            let unread = self.hints.iter().filter(|h| h.state == 0).count();
+            fill(&mut pix, &mut paint, Rect::from_xywh(0.0, y, PANEL_W as f32, 28.0).unwrap(), [51, 51, 51, 245]);
+            font.draw(&mut pix, "Підказки", 12.0, y + 19.0, 13.0, [242, 242, 242]);
+            if unread > 0 {
+                paint.set_color_rgba8(232, 17, 35, 255);
+                if let Some(c) = PathBuilder::from_circle(PANEL_W as f32 - 20.0, y + 14.0, 10.0) {
+                    pix.fill_path(&c, &paint, FillRule::Winding, Transform::identity(), None);
+                }
+                let label = unread.min(99).to_string();
+                let tw = font.width(&label, 12.0);
+                font.draw(&mut pix, &label, PANEL_W as f32 - 20.0 - tw / 2.0, y + 18.0, 12.0, [255, 255, 255]);
+            }
+            self.actions.push((Rect::from_xywh(0.0, y, PANEL_W as f32, 28.0).unwrap(), Action::OpenHistory));
+            y += 32.0;
+        }
         if show_button {
             let x = PANEL_W as f32 - 40.0;
             fill(&mut pix, &mut paint, Rect::from_xywh(x, y, 40.0, 40.0).unwrap(), [0, 120, 215, 215]);
@@ -832,6 +998,7 @@ impl Ui {
         unsafe {
             let _ = SetWindowPos(self.panel_hwnd, HWND_TOPMOST, px, py, PANEL_W, h, SWP_NOACTIVATE);
         }
+        self.panel_rect = (px, py, PANEL_W, h);
         dib.present(self.panel_hwnd, px, py, &pix);
         if let Some(old) = self.panel_dib.replace(dib) {
             unsafe {
@@ -848,10 +1015,30 @@ impl Ui {
 
     fn do_action(&mut self, a: Action) {
         match a {
-            Action::CloseHint(i) => {
-                if i < self.hints.len() {
-                    let h = self.hints.remove(i);
-                    self.node.agent_hint_closed(&h.lead, h.id);
+            Action::Ack(i, state) => {
+                if let Some(h) = self.hints.get_mut(i) {
+                    h.state = state;
+                    h.toast_from = None;
+                    self.node.agent_hint_ack(&h.lead, h.id, state);
+                }
+            }
+            Action::OpenHistory => {
+                self.history_open = !self.history_open;
+                self.history_top = 0;
+                if self.history_open {
+                    for h in self.hints.iter_mut() {
+                        h.toast_from = None;
+                        if h.state == 0 {
+                            h.state = 1;
+                            self.node.agent_hint_ack(&h.lead, h.id, 1);
+                        }
+                    }
+                }
+            }
+            Action::Consent(i, allow) => {
+                if i < self.consent.len() {
+                    let (lead, _) = self.consent.remove(i);
+                    self.node.agent_consent(&lead, allow);
                 }
             }
             Action::CopyHint(i) => {
@@ -871,6 +1058,45 @@ impl Ui {
             Action::HideDrawings => self.toggle_hidden(),
         }
         self.panel_dirty = true;
+    }
+
+    fn hint_hold(&self) -> Duration {
+        Duration::from_secs(self.policy.hint_show_sec.max(10) as u64)
+    }
+
+    /// Cards stay while the cursor is on them, then slide away. A click elsewhere closes the list.
+    fn tick_hints(&mut self) {
+        let now = Instant::now();
+        let mut p = POINT::default();
+        unsafe {
+            let _ = GetCursorPos(&mut p);
+        }
+        let (x, y, w, h) = self.panel_rect;
+        let over = self.panel_visible && p.x >= x && p.x < x + w && p.y >= y && p.y < y + h;
+        let hold = self.hint_hold();
+        let mut changed = false;
+        for hint in self.hints.iter_mut() {
+            let Some(t) = hint.toast_from else { continue };
+            let e = now.duration_since(t);
+            if e <= hold {
+                continue;
+            }
+            if over {
+                hint.toast_from = Some(now - hold);
+            } else if e >= hold + HINT_SLIDE {
+                hint.toast_from = None;
+            }
+            changed = true;
+        }
+        let down = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } < 0;
+        if down && !self.lbutton_was && !over && self.history_open {
+            self.history_open = false;
+            changed = true;
+        }
+        self.lbutton_was = down;
+        if changed {
+            self.panel_dirty = true;
+        }
     }
 
     fn toggle_hidden(&mut self) {
@@ -931,6 +1157,11 @@ impl Ui {
                         self.do_action(a);
                     }
                 }
+                Ev::PanelWheel(delta) => {
+                    let limit = self.hints.len().saturating_sub(HISTORY_ROWS) as i32;
+                    self.history_top = (self.history_top as i32 + delta.signum()).clamp(0, limit.max(0)) as usize;
+                    self.panel_dirty = true;
+                }
                 Ev::TrayMenu => self.tray_menu(),
                 Ev::TrayOpen => {
                     if self.is_lead_pc {
@@ -944,7 +1175,13 @@ impl Ui {
     }
 
     fn needs_animation(&self) -> bool {
-        !self.items.is_empty() || self.status.is_some() || self.hidden_until.is_some()
+        !self.items.is_empty()
+            || self.status.is_some()
+            || self.hidden_until.is_some()
+            || !self.pointers.is_empty()
+            || !self.taps.is_empty()
+            || self.history_open
+            || self.hints.iter().any(|h| h.toast_from.is_some())
     }
 
     fn update_timer(&mut self) {
@@ -962,7 +1199,68 @@ impl Ui {
     }
 }
 
-fn render_item(pix: &mut Pixmap, item: &DrawItem, alpha: f32, now: Instant, font: Option<&Font>) {
+/// The row of answers under a hint.
+fn draw_ack_row(font: &Font, pix: &mut Pixmap, actions: &mut Vec<(Rect, Action)>, x0: f32, y: f32, i: usize) {
+    for (label, state, color, dx, w) in [
+        ("Прийняв", 2u8, [108, 203, 95], 15.0f32, 66.0f32),
+        ("Відхилив", 3, [255, 120, 130], 88.0, 70.0),
+        ("Ігнор", 4, [190, 190, 190], 166.0, 46.0),
+    ] {
+        font.draw(pix, label, x0 + dx, y + 15.0, 12.0, color);
+        if let Some(r) = Rect::from_xywh(x0 + dx - 5.0, y - 2.0, w, 24.0) {
+            actions.push((r, Action::Ack(i, state)));
+        }
+    }
+    font.draw(pix, "Копія", x0 + 226.0, y + 15.0, 12.0, [96, 205, 255]);
+    if let Some(r) = Rect::from_xywh(x0 + 221.0, y - 2.0, 55.0, 24.0) {
+        actions.push((r, Action::CopyHint(i)));
+    }
+}
+
+/// Short rings at the place the lead clicked.
+fn render_tap(pix: &mut Pixmap, tap: &TapMark, now: Instant) {
+    let (w, h) = (pix.width() as f32, pix.height() as f32);
+    let (x, y) = (tap.x * w, tap.y * h);
+    let progress = (now.duration_since(tap.start).as_secs_f32() / TAP_LIFE.as_secs_f32()).clamp(0.0, 1.0);
+    let [r, g, b] = tap.color;
+    let mut paint = Paint::default();
+    paint.anti_alias = true;
+    paint.set_color_rgba8(r, g, b, ((1.0 - progress) * 230.0) as u8);
+    let stroke = Stroke { width: 2.5, ..Default::default() };
+    for ring in 1..=3 {
+        let radius = 6.0 + progress * 12.0 * ring as f32;
+        if let Some(path) = PathBuilder::from_circle(x, y, radius) {
+            pix.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+        }
+    }
+}
+
+/// The glowing dot that shows where the lead is pointing. It leaves no trace.
+fn render_pointer(pix: &mut Pixmap, p: &PointerMark, font: Option<&Font>) {
+    let (w, h) = (pix.width() as f32, pix.height() as f32);
+    let (x, y) = (p.x * w, p.y * h);
+    let [r, g, b] = p.color;
+    let mut paint = Paint::default();
+    paint.anti_alias = true;
+    let size = p.size.max(4.0);
+    for (scale, alpha) in [(2.4f32, 50u8), (1.6, 110), (1.0, 255)] {
+        paint.set_color_rgba8(r, g, b, alpha);
+        if let Some(c) = PathBuilder::from_circle(x, y, size * scale) {
+            pix.fill_path(&c, &paint, FillRule::Winding, Transform::identity(), None);
+        }
+    }
+    if let Some(font) = font {
+        let tw = font.width(&p.name, 13.0);
+        let (lx, ly) = ((x + size * 2.0).min(w - tw - 12.0), (y + size * 2.0).min(h - 24.0));
+        paint.set_color_rgba8(r, g, b, 240);
+        if let Some(tag) = Rect::from_xywh(lx, ly, tw + 10.0, 20.0) {
+            pix.fill_rect(tag, &paint, Transform::identity(), None);
+        }
+        font.draw(pix, &p.name, lx + 5.0, ly + 15.0, 13.0, [255, 255, 255]);
+    }
+}
+
+fn render_item(pix: &mut Pixmap, item: &DrawItem, alpha: f32, font: Option<&Font>) {
     let (w, h) = (pix.width() as f32, pix.height() as f32);
     let map = |p: [f32; 2]| (p[0] * w, p[1] * h);
     let [r, g, b] = item.color;
@@ -974,8 +1272,8 @@ fn render_item(pix: &mut Pixmap, item: &DrawItem, alpha: f32, now: Instant, font
     match item.tool {
         Tool::Marker | Tool::MarkerSemi => {
             let semi = item.tool == Tool::MarkerSemi;
-            stroke.width = if semi { 20.0 } else { 4.0 };
-            set(&mut paint, alpha * if semi { 0.38 } else { 1.0 });
+            stroke.width = if item.width > 0.0 { item.width } else if semi { 20.0 } else { 4.0 };
+            set(&mut paint, alpha * if item.alpha > 0.0 { item.alpha } else if semi { 0.38 } else { 1.0 });
             let mut pb = PathBuilder::new();
             let (x, y) = map(item.points[0]);
             pb.move_to(x, y);
@@ -996,7 +1294,7 @@ fn render_item(pix: &mut Pixmap, item: &DrawItem, alpha: f32, now: Instant, font
             }
             let (a, b2) = (map(item.points[0]), map(item.points[1]));
             let (x, y, rw, rh) = (a.0.min(b2.0), a.1.min(b2.1), (a.0 - b2.0).abs().max(1.0), (a.1 - b2.1).abs().max(1.0));
-            stroke.width = 3.0;
+            stroke.width = if item.width > 0.0 { item.width } else { 3.0 };
             set(&mut paint, alpha);
             if let Some(rect) = Rect::from_xywh(x, y, rw, rh) {
                 let path = PathBuilder::from_rect(rect);
@@ -1008,10 +1306,10 @@ fn render_item(pix: &mut Pixmap, item: &DrawItem, alpha: f32, now: Instant, font
                 return;
             }
             let (a, tip) = (map(item.points[0]), map(item.points[1]));
-            stroke.width = 4.0;
+            stroke.width = if item.width > 0.0 { item.width } else { 4.0 };
             set(&mut paint, alpha);
             let angle = (tip.1 - a.1).atan2(tip.0 - a.0);
-            let head = 18.0;
+            let head = 14.0 + stroke.width * 1.5;
             let mut pb = PathBuilder::new();
             pb.move_to(a.0, a.1);
             pb.line_to(tip.0, tip.1);
@@ -1023,30 +1321,7 @@ fn render_item(pix: &mut Pixmap, item: &DrawItem, alpha: f32, now: Instant, font
                 pix.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
             }
         }
-        Tool::Laser => {
-            stroke.width = 5.0;
-            for i in 1..item.points.len() {
-                let age = now.duration_since(item.stamps[i.min(item.stamps.len() - 1)]);
-                if age >= LASER_LIFE {
-                    continue;
-                }
-                set(&mut paint, 1.0 - age.as_secs_f32() / LASER_LIFE.as_secs_f32());
-                let (a, b2) = (map(item.points[i - 1]), map(item.points[i]));
-                let mut pb = PathBuilder::new();
-                pb.move_to(a.0, a.1);
-                pb.line_to(b2.0, b2.1);
-                if let Some(path) = pb.finish() {
-                    pix.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
-                }
-            }
-            if item.ended.is_none() {
-                let (x, y) = map(last);
-                set(&mut paint, 1.0);
-                if let Some(circle) = PathBuilder::from_circle(x, y, 7.0) {
-                    pix.fill_path(&circle, &paint, FillRule::Winding, Transform::identity(), None);
-                }
-            }
-        }
+        Tool::Laser => {}
     }
     // Name tag, so the employee can see who is drawing.
     if let Some(font) = font {
@@ -1103,6 +1378,13 @@ pub fn run(node: Arc<Node>, rx: Receiver<UiCmd>, handle: UiHandle, is_lead_pc: b
             overlays: Vec::new(),
             items: Vec::new(),
             hints: Vec::new(),
+            history_open: false,
+            history_top: 0,
+            consent: Vec::new(),
+            pointers: Vec::new(),
+            taps: Vec::new(),
+            panel_rect: (0, 0, 0, 0),
+            lbutton_was: false,
             activity: Vec::new(),
             policy,
             font: Font::load(),
@@ -1129,6 +1411,7 @@ pub fn run(node: Arc<Node>, rx: Receiver<UiCmd>, handle: UiHandle, is_lead_pc: b
                 ui.on_cmd(c);
             }
             ui.drain_events();
+            ui.tick_hints();
             if ui.status.is_some() {
                 ui.panel_dirty = true;
             }

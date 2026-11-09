@@ -21,7 +21,8 @@ struct Link {
     peer: Arc<Peer>,
     mode: Mode,
     thumb: bool,
-    screen_task: Option<(u8, ScreenLevel, AbortHandle)>,
+    screen_task: Option<(u8, ScreenLevel, u8, AbortHandle)>,
+    consent_asked: bool,
     thumb_task: Option<AbortHandle>,
     last_voice: i64,
     last_draw: i64,
@@ -116,7 +117,7 @@ fn start_audio(targets: Arc<Mutex<Vec<quinn::Connection>>>, stop: Arc<AtomicBool
             let n = seq.fetch_add(1, Ordering::Relaxed);
             let packet = bytes_packet(source, me, n, opus);
             for c in t.lock().iter() {
-                let _ = c.send_datagram(packet.clone());
+                audio::send_voice(c, packet.clone());
             }
         });
     }
@@ -139,7 +140,7 @@ impl Node {
     pub fn agent_lead_connected(self: &Arc<Self>, peer: &Arc<Peer>) {
         self.agent.lock().links.insert(
             peer.id.clone(),
-            Link { peer: peer.clone(), mode: Mode::default(), thumb: false, screen_task: None, thumb_task: None, last_voice: 0, last_draw: 0 },
+            Link { peer: peer.clone(), mode: Mode::default(), thumb: false, screen_task: None, consent_asked: false, thumb_task: None, last_voice: 0, last_draw: 0 },
         );
         peer.send(Msg::ScreenInfo(capture::list_monitors()));
         peer.send(Msg::Status { locked: self.agent.lock().locked });
@@ -153,7 +154,7 @@ impl Node {
             if still_same {
                 if let Some(l) = a.links.remove(&peer.id) {
                     if let Some(t) = l.screen_task {
-                        t.2.abort();
+                        t.3.abort();
                     }
                     if let Some(t) = l.thumb_task {
                         t.abort();
@@ -181,7 +182,12 @@ impl Node {
             let locked = a.locked;
             let mut listeners = Vec::new();
             let mut any_active = false;
+            let (needs_trust, trusted) = {
+                let st = self.state.read();
+                (st.directory.is_approved_lead(&self.identity.id), st.trusted_leads.clone())
+            };
             for l in a.links.values_mut() {
+                let allowed = !needs_trust || trusted.contains(&l.peer.id);
                 let rights = {
                     let st = self.state.read();
                     if st.directory.lead_can_reach(&l.peer.id, &self.identity.id) {
@@ -190,16 +196,17 @@ impl Node {
                         None
                     }
                 };
-                let (can_view, can_listen) = rights.map(|r| (r.view, r.listen)).unwrap_or((false, false));
+                let (can_view, can_listen) = rights.map(|r| (r.view && allowed, r.listen && allowed)).unwrap_or((false, false));
                 let level = if locked || !can_view { ScreenLevel::Off } else { l.mode.screen };
-                let wanted = Profile::from_level(level).map(|p| (l.mode.monitor, level, p));
-                let current = l.screen_task.as_ref().map(|t| (t.0, t.1));
-                if wanted.map(|w| (w.0, w.1)) != current {
+                let quality = l.mode.quality;
+                let wanted = Profile::from_level(level, quality).map(|p| (l.mode.monitor, level, quality, p));
+                let current = l.screen_task.as_ref().map(|t| (t.0, t.1, t.2));
+                if wanted.map(|w| (w.0, w.1, w.2)) != current {
                     if let Some(t) = l.screen_task.take() {
-                        t.2.abort();
+                        t.3.abort();
                     }
-                    if let Some((m, lv, p)) = wanted {
-                        l.screen_task = Some((m, lv, screen_task(self, l.peer.conn.clone(), m, p, proto::UNI_SCREEN)));
+                    if let Some((m, lv, q, p)) = wanted {
+                        l.screen_task = Some((m, lv, q, screen_task(self, l.peer.conn.clone(), m, p, proto::UNI_SCREEN)));
                     }
                 }
                 let thumb_on = l.thumb && !locked && can_view;
@@ -213,7 +220,7 @@ impl Node {
                 if l.mode.listen && !locked && can_listen {
                     listeners.push(l.peer.conn.clone());
                 }
-                any_active |= l.mode.listen || l.mode.screen != ScreenLevel::Off;
+                any_active |= allowed && (l.mode.listen || l.mode.screen != ScreenLevel::Off);
             }
             if listeners.is_empty() {
                 if let Some(run) = a.audio.take() {
@@ -240,10 +247,28 @@ impl Node {
 
     pub fn agent_on_message(self: &Arc<Self>, peer: &Arc<Peer>, m: Msg) {
         let Some(rights) = self.rights_of(&peer.id) else { return };
+        let waiting = self.waits_for_consent(&peer.id);
+        if waiting && !matches!(m, Msg::SetMode(_) | Msg::SetThumb(_)) {
+            return;
+        }
         match m {
             Msg::SetMode(mode) => {
-                if let Some(l) = self.agent.lock().links.get_mut(&peer.id) {
-                    l.mode = mode;
+                let ask = {
+                    let mut a = self.agent.lock();
+                    let active = mode.listen || mode.screen != ScreenLevel::Off;
+                    match a.links.get_mut(&peer.id) {
+                        Some(l) => {
+                            l.mode = mode;
+                            let ask = waiting && active && !l.consent_asked;
+                            l.consent_asked = active && (l.consent_asked || ask);
+                            ask
+                        }
+                        None => false,
+                    }
+                };
+                if ask {
+                    peer.send(Msg::ConsentState { state: 1 });
+                    self.ui.send(UiCmd::Consent { lead: peer.id.clone(), name: self.member_name(&peer.id) });
                 }
                 if mode.screen != ScreenLevel::Full {
                     self.release_control(&peer.id);
@@ -269,6 +294,12 @@ impl Node {
                 for o in others {
                     o.send(Msg::Draw { from: peer.id.clone(), op: op.clone() });
                 }
+            }
+            Msg::Pointer { monitor, x, y, on, size } if rights.draw => {
+                self.ui.send(UiCmd::Pointer { lead: peer.id.clone(), name: self.member_name(&peer.id), color: color_for(&peer.id), monitor, x, y, on, size });
+            }
+            Msg::Tap { monitor, x, y } if rights.view => {
+                self.ui.send(UiCmd::Tap { color: color_for(&peer.id), monitor, x, y });
             }
             Msg::Hint { id, text } if rights.whisper || rights.draw => {
                 self.ui.send(UiCmd::Hint { lead: peer.id.clone(), name: self.member_name(&peer.id), color: color_for(&peer.id), id, text });
@@ -308,6 +339,31 @@ impl Node {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// A lead's PC asks once before another lead may see or hear it.
+    fn waits_for_consent(&self, lead: &str) -> bool {
+        let st = self.state.read();
+        st.directory.is_approved_lead(&self.identity.id) && !st.trusted_leads.iter().any(|l| l == lead)
+    }
+
+    /// The owner of this PC answered the first connection of a lead.
+    pub fn agent_consent(self: &Arc<Self>, lead: &str, allow: bool) {
+        if allow {
+            self.state.write().trusted_leads.push(lead.to_string());
+            self.save();
+            self.audit_log(&self.member_name(lead), "Дозволено підключення до ПК керівника");
+        }
+        if let Some(p) = self.peer(lead) {
+            p.send(Msg::ConsentState { state: if allow { 0 } else { 2 } });
+        }
+        self.agent_reconcile();
+    }
+
+    pub fn agent_hint_ack(self: &Arc<Self>, lead: &str, id: u32, state: u8) {
+        if let Some(p) = self.peer(lead) {
+            p.send(Msg::HintAck { id, state });
         }
     }
 
@@ -371,7 +427,7 @@ impl Node {
         };
         // Other leads on this employee hear the hint too, so they do not talk over each other.
         for c in relay {
-            let _ = c.send_datagram(bytes::Bytes::copy_from_slice(raw));
+            audio::send_voice(&c, bytes::Bytes::copy_from_slice(raw));
         }
     }
 
@@ -401,12 +457,6 @@ impl Node {
         };
         for l in leads {
             l.send(Msg::HelpCancel { id });
-        }
-    }
-
-    pub fn agent_hint_closed(self: &Arc<Self>, lead: &str, id: u32) {
-        if let Some(p) = self.peer(lead) {
-            p.send(Msg::HintClosed { id });
         }
     }
 

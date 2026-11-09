@@ -38,6 +38,18 @@ pub struct Stroke {
     pub ended_ms: Option<i64>,
     pub color: [u8; 3],
     pub stamps: Vec<i64>,
+    pub width: f32,
+    pub alpha: f32,
+}
+
+/// One hint of the conversation with an employee. Kept only in memory.
+#[derive(Clone)]
+pub struct HintEntry {
+    pub id: u32,
+    pub text: String,
+    pub ts: i64,
+    /// 0 unread, 1 read, 2 accepted, 3 rejected, 4 ignored.
+    pub state: u8,
 }
 
 #[derive(Default)]
@@ -52,7 +64,9 @@ pub struct TargetView {
     pub cursor: Option<(u8, f32, f32)>,
     pub strokes: Vec<Stroke>,
     pub control_holder: String,
-    pub hints_open: Vec<(u32, String)>,
+    pub hints: Vec<HintEntry>,
+    pub consent: u8,
+    pub last_audio_ms: i64,
     pub next_draw: u32,
     /// What the secure screen process was last asked to do.
     pub secure_mode: Mode,
@@ -151,8 +165,19 @@ impl Node {
                 let t = l.targets.entry(peer.id.clone()).or_default();
                 apply_draw(t, &from, color_for(&from), op);
             }
-            Msg::HintClosed { id } => l.targets.entry(peer.id.clone()).or_default().hints_open.retain(|h| h.0 != id),
+            Msg::HintAck { id, state } => {
+                if let Some(h) = l.targets.entry(peer.id.clone()).or_default().hints.iter_mut().find(|h| h.id == id) {
+                    h.state = state;
+                }
+            }
+            Msg::ConsentState { state } => l.targets.entry(peer.id.clone()).or_default().consent = state,
             Msg::HelpRequest { id, reason } => {
+                {
+                    let st = self.state.read();
+                    if st.lead.do_not_disturb || st.lead.muted_help.iter().any(|m| m == &peer.id) {
+                        return;
+                    }
+                }
                 l.help.retain(|h| h.target != peer.id);
                 l.help.insert(0, HelpItem { target: peer.id.clone(), id, reason, ts: now_ms(), taken_by: String::new() });
                 l.help_alert = true;
@@ -194,6 +219,9 @@ impl Node {
         }
         if !l.targets.get(&peer.id).map(|t| t.mode.listen).unwrap_or(false) {
             return;
+        }
+        if let Some(t) = l.targets.get_mut(&peer.id) {
+            t.last_audio_ms = now_ms();
         }
         if l.player.is_none() {
             l.player = Some(Player::new());
@@ -331,6 +359,9 @@ impl Node {
             }
             prev
         };
+        if mode.screen == ScreenLevel::Off && !mode.listen {
+            self.lead.lock().targets.entry(target.to_string()).or_default().consent = 0;
+        }
         if let Some(p) = self.peer(target) {
             p.send(Msg::SetMode(mode));
         }
@@ -338,8 +369,8 @@ impl Node {
             let describe = |m: Mode| {
                 let screen = match m.screen {
                     ScreenLevel::Off => "без екрана",
-                    ScreenLevel::Eco => "економ",
-                    ScreenLevel::Full => "повний екран",
+                    ScreenLevel::Eco => "низька якість",
+                    ScreenLevel::Full => ["максимальна якість", "висока якість", "середня якість", "низька якість"][m.quality.min(3) as usize],
                 };
                 format!("{}, {}", if m.listen { "слухає" } else { "не слухає" }, screen)
             };
@@ -373,6 +404,29 @@ impl Node {
         }
     }
 
+    pub fn lead_send_pointer(&self, target: &str, monitor: u8, x: f32, y: f32, on: bool, size: f32) {
+        if let Some(p) = self.peer(target) {
+            p.send(Msg::Pointer { monitor, x, y, on, size });
+        }
+    }
+
+    /// Shows short rings at the place the lead clicked.
+    pub fn lead_send_tap(&self, target: &str, x: f32, y: f32) {
+        let monitor = self.lead.lock().targets.get(target).map(|t| t.mode.monitor).unwrap_or(0);
+        if let Some(p) = self.peer(target) {
+            p.send(Msg::Tap { monitor, x, y });
+        }
+    }
+
+    /// Going to the tray with the close button ends every session.
+    pub fn lead_passive(self: &Arc<Self>) {
+        let ids: Vec<String> = self.lead.lock().targets.iter().filter(|(_, t)| t.mode.listen || t.mode.screen != ScreenLevel::Off).map(|(k, _)| k.clone()).collect();
+        for id in ids {
+            self.lead_set_mode(&id, Mode::default());
+        }
+        self.lead_set_voice_target(None);
+    }
+
     pub fn lead_next_draw_id(&self, target: &str) -> u32 {
         let mut l = self.lead.lock();
         let t = l.targets.entry(target.to_string()).or_default();
@@ -385,7 +439,7 @@ impl Node {
             let mut l = self.lead.lock();
             l.next_hint += 1;
             let id = l.next_hint;
-            l.targets.entry(target.to_string()).or_default().hints_open.push((id, text.clone()));
+            l.targets.entry(target.to_string()).or_default().hints.push(HintEntry { id, text: text.clone(), ts: now_ms(), state: 0 });
             id
         };
         if let Some(p) = self.peer(target) {
@@ -459,7 +513,7 @@ impl Node {
                         let n = seq.fetch_add(1, Ordering::Relaxed);
                         let packet = proto::audio_packet(proto::SRC_LEAD_VOICE, me, n, opus);
                         if let Some(c) = t.lock().as_ref() {
-                            let _ = c.send_datagram(bytes::Bytes::from(packet));
+                            audio::send_voice(c, bytes::Bytes::from(packet));
                         }
                     });
                     l.voice = Some(run);
@@ -556,8 +610,9 @@ impl Node {
                 let now = now_ms();
                 let mut l = self.lead.lock();
                 let mut animate = false;
+                let fade = self.state.read().directory.policy.stroke_fade_sec as i64 * 1000;
                 for t in l.targets.values_mut() {
-                    t.strokes.retain(|s| !stroke_expired(s, now));
+                    t.strokes.retain(|s| !stroke_expired(s, now, fade));
                     animate |= !t.strokes.is_empty();
                 }
                 drop(l);
@@ -571,17 +626,14 @@ impl Node {
 
 pub const FADE_MS: i64 = 1500;
 
-pub fn stroke_expired(s: &Stroke, now: i64) -> bool {
-    if s.tool == Tool::Laser {
-        return s.ended_ms.map(|e| now - e > 1200).unwrap_or(false);
-    }
-    s.ended_ms.map(|e| now - e > 8000 + FADE_MS).unwrap_or(false)
+pub fn stroke_expired(s: &Stroke, now: i64, fade_after_ms: i64) -> bool {
+    s.ended_ms.map(|e| now - e > fade_after_ms + FADE_MS).unwrap_or(false)
 }
 
 pub fn apply_draw(t: &mut TargetView, lead: &str, color: [u8; 3], op: DrawOp) {
     let now = now_ms();
     match op {
-        DrawOp::Begin { id, tool, monitor, x, y } => t.strokes.push(Stroke {
+        DrawOp::Begin { id, tool, monitor, x, y, width, alpha } => t.strokes.push(Stroke {
             lead: lead.to_string(),
             id,
             tool,
@@ -590,6 +642,8 @@ pub fn apply_draw(t: &mut TargetView, lead: &str, color: [u8; 3], op: DrawOp) {
             ended_ms: None,
             color,
             stamps: vec![now],
+            width,
+            alpha,
         }),
         DrawOp::Point { id, x, y } => {
             if let Some(s) = t.strokes.iter_mut().rev().find(|s| s.lead == lead && s.id == id) {
@@ -606,6 +660,7 @@ pub fn apply_draw(t: &mut TargetView, lead: &str, color: [u8; 3], op: DrawOp) {
                 s.ended_ms = Some(now);
             }
         }
+        DrawOp::Cancel { id } => t.strokes.retain(|s| !(s.lead == lead && s.id == id)),
         DrawOp::ClearMine => t.strokes.retain(|s| s.lead != lead),
         DrawOp::ClearAll => t.strokes.clear(),
     }

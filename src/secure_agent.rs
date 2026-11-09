@@ -72,7 +72,7 @@ impl Secure {
             t.abort();
         }
         let level = if rights.view { mode.screen } else { ScreenLevel::Off };
-        if let Some(profile) = Profile::from_level(level) {
+        if let Some(profile) = Profile::from_level(level, mode.quality) {
             let (hub, conn) = (self.hub.clone(), conn.clone());
             let monitor = mode.monitor;
             link.screen_task = Some(

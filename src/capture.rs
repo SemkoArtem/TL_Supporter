@@ -20,40 +20,50 @@ use windows::Win32::Graphics::Dxgi::*;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Profile {
-    Full,
-    Eco,
+    Max,
+    High,
+    Medium,
+    Low,
     Thumb,
 }
 
 impl Profile {
-    pub fn from_level(level: ScreenLevel) -> Option<Self> {
-        match level {
-            ScreenLevel::Off => None,
-            ScreenLevel::Eco => Some(Profile::Eco),
-            ScreenLevel::Full => Some(Profile::Full),
+    pub fn from_level(level: ScreenLevel, quality: u8) -> Option<Self> {
+        match (level, quality) {
+            (ScreenLevel::Off, _) => None,
+            (ScreenLevel::Eco, _) => Some(Profile::Low),
+            (ScreenLevel::Full, 1) => Some(Profile::High),
+            (ScreenLevel::Full, 2) => Some(Profile::Medium),
+            (ScreenLevel::Full, 3) => Some(Profile::Low),
+            (ScreenLevel::Full, _) => Some(Profile::Max),
         }
     }
 
     fn interval(self) -> Duration {
         match self {
-            Profile::Full => Duration::from_millis(40),
-            Profile::Eco => Duration::from_millis(200),
-            Profile::Thumb => Duration::from_millis(2000),
+            Profile::Max => Duration::from_millis(33),
+            Profile::High => Duration::from_millis(40),
+            Profile::Medium => Duration::from_millis(66),
+            Profile::Low => Duration::from_millis(125),
+            // Previews of the whole team do not need to be fresh.
+            Profile::Thumb => Duration::from_millis(5000),
         }
     }
 
     fn quality(self) -> u8 {
         match self {
-            Profile::Full => 80,
-            Profile::Eco => 50,
+            Profile::Max => 92,
+            Profile::High => 80,
+            Profile::Medium => 65,
+            Profile::Low => 45,
             Profile::Thumb => 55,
         }
     }
 
     fn scale_div(self, width: u32) -> u32 {
         match self {
-            Profile::Full => 1,
-            Profile::Eco => 2,
+            Profile::Max | Profile::High | Profile::Medium => 1,
+            Profile::Low => 2,
             Profile::Thumb => (width / 320).max(1),
         }
     }
@@ -66,7 +76,7 @@ impl Profile {
     }
 }
 
-const PROFILES: [Profile; 3] = [Profile::Full, Profile::Eco, Profile::Thumb];
+const PROFILES: [Profile; 5] = [Profile::Max, Profile::High, Profile::Medium, Profile::Low, Profile::Thumb];
 
 #[derive(Default)]
 pub struct Snapshot {

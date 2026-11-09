@@ -33,6 +33,7 @@ pub mod icon {
     pub const MINI: &str = "\u{E73F}";
     pub const PEOPLE: &str = "\u{E716}";
     pub const MORE: &str = "\u{E712}";
+    pub const QUIET: &str = "\u{E708}";
     pub const MENU: &str = "\u{E700}";
     pub const BRUSH: &str = "\u{E771}";
     pub const SYNC: &str = "\u{E895}";
@@ -135,10 +136,11 @@ pub fn set_mode(ctx: &egui::Context, light: bool) {
         v.extreme_bg_color = Color32::WHITE;
         v.selection.bg_fill = Color32::from_rgb(204, 228, 247);
         v.selection.stroke = Stroke::new(1.0_f32, Color32::from_rgb(20, 20, 20));
-        v.widgets.inactive.weak_bg_fill = Color32::from_rgb(230, 230, 230);
-        v.widgets.inactive.bg_fill = Color32::from_rgb(230, 230, 230);
-        v.widgets.hovered.weak_bg_fill = Color32::from_rgb(230, 230, 230);
-        v.widgets.hovered.bg_stroke = Stroke::new(2.0_f32, Color32::from_gray(122));
+        v.widgets.inactive.weak_bg_fill = Color32::from_rgb(225, 225, 225);
+        v.widgets.inactive.bg_fill = Color32::from_rgb(225, 225, 225);
+        v.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, Color32::from_gray(130));
+        v.widgets.hovered.weak_bg_fill = Color32::from_rgb(210, 210, 210);
+        v.widgets.hovered.bg_stroke = Stroke::new(2.0_f32, ACCENT);
         v.widgets.active.weak_bg_fill = Color32::from_rgb(204, 204, 204);
     } else {
         v.panel_fill = Color32::from_rgb(31, 31, 31);
@@ -150,13 +152,14 @@ pub fn set_mode(ctx: &egui::Context, light: bool) {
         v.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, Color32::from_gray(232));
         v.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, Color32::from_gray(64));
         v.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, Color32::from_gray(242));
-        v.widgets.inactive.weak_bg_fill = Color32::from_rgb(51, 51, 51);
-        v.widgets.inactive.bg_fill = Color32::from_rgb(51, 51, 51);
-        v.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, Color32::from_gray(64));
+        // Clear edges: controls must not melt into the dark background.
+        v.widgets.inactive.weak_bg_fill = Color32::from_rgb(64, 64, 64);
+        v.widgets.inactive.bg_fill = Color32::from_rgb(64, 64, 64);
+        v.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, Color32::from_gray(125));
         v.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, Color32::WHITE);
-        v.widgets.hovered.weak_bg_fill = Color32::from_rgb(51, 51, 51);
-        v.widgets.hovered.bg_fill = Color32::from_rgb(64, 64, 64);
-        v.widgets.hovered.bg_stroke = Stroke::new(2.0_f32, Color32::from_gray(133));
+        v.widgets.hovered.weak_bg_fill = Color32::from_rgb(84, 84, 84);
+        v.widgets.hovered.bg_fill = Color32::from_rgb(84, 84, 84);
+        v.widgets.hovered.bg_stroke = Stroke::new(2.0_f32, Color32::from_rgb(96, 205, 255));
         v.widgets.active.fg_stroke = Stroke::new(1.0_f32, Color32::WHITE);
         v.widgets.active.weak_bg_fill = Color32::from_rgb(102, 102, 102);
         v.widgets.active.bg_fill = Color32::from_rgb(102, 102, 102);
@@ -203,6 +206,17 @@ pub fn rail_frame() -> egui::Frame {
 /// Roomy margins of a Windows 10 page.
 pub fn page_frame(ctx: &egui::Context) -> egui::Frame {
     egui::Frame::central_panel(&ctx.style()).inner_margin(Margin::symmetric(24.0, 16.0))
+}
+
+/// A button that stays visibly a button and shows when it is switched on.
+pub fn pick(ui: &mut egui::Ui, selected: bool, text: impl Into<egui::WidgetText>) -> egui::Response {
+    ui.add(egui::Button::new(text).selected(selected))
+}
+
+/// A small title inside a settings page.
+pub fn section(ui: &mut egui::Ui, text: &str) {
+    ui.add_space(4.0);
+    ui.label(egui::RichText::new(text).size(17.0).strong());
 }
 
 pub fn accent_button(text: &str) -> egui::Button<'static> {

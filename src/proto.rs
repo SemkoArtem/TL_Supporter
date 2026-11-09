@@ -26,6 +26,8 @@ pub struct Mode {
     pub listen: bool,
     pub screen: ScreenLevel,
     pub monitor: u8,
+    /// 0 maximum, 1 high, 2 medium, 3 low.
+    pub quality: u8,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -39,9 +41,22 @@ pub enum Tool {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum DrawOp {
-    Begin { id: u32, tool: Tool, monitor: u8, x: f32, y: f32 },
+    Begin {
+        id: u32,
+        tool: Tool,
+        monitor: u8,
+        x: f32,
+        y: f32,
+        /// Line width in screen pixels, 0 means the default of the tool.
+        #[serde(default)]
+        width: f32,
+        /// Opacity from 0 to 1, 0 means the default of the tool.
+        #[serde(default)]
+        alpha: f32,
+    },
     Point { id: u32, x: f32, y: f32 },
     End { id: u32 },
+    Cancel { id: u32 },
     ClearMine,
     ClearAll,
 }
@@ -118,6 +133,14 @@ pub enum Msg {
     Draw { from: String, op: DrawOp },
     Hint { id: u32, text: String },
     HintClosed { id: u32 },
+    /// 1 read, 2 accepted, 3 rejected, 4 ignored.
+    HintAck { id: u32, state: u8 },
+    /// A pointer that only shows where the lead is looking, it leaves no drawing.
+    Pointer { monitor: u8, x: f32, y: f32, on: bool, size: f32 },
+    /// A click of the lead, shown as short rings on the employee's screen.
+    Tap { monitor: u8, x: f32, y: f32 },
+    /// Answer of a lead's PC to the first connection: 0 allowed, 1 waiting, 2 refused.
+    ConsentState { state: u8 },
     HelpRequest { id: u32, reason: String },
     HelpTaken { id: u32, by: String, name: String },
     HelpCancel { id: u32 },
@@ -210,14 +233,15 @@ mod tests {
         }
         let bytes = rmp_serde::to_vec_named(&FutureMode {
             listen: true,
-            screen: ScreenLevel::Eco,
+            screen: ScreenLevel::Full,
             monitor: 1,
             new_field: 9,
         })
         .unwrap();
         let m: Mode = rmp_serde::from_slice(&bytes).unwrap();
         assert!(m.listen);
-        assert_eq!(m.screen, ScreenLevel::Eco);
+        assert_eq!(m.screen, ScreenLevel::Full);
+        assert_eq!(m.quality, 0, "a missing field means maximum quality");
     }
 
     #[test]
