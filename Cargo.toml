@@ -1,0 +1,96 @@
+[package]
+name = "tl-supporter"
+version = "0.1.0"
+edition = "2021"
+description = "LAN-only team lead assistance tool"
+
+[[bin]]
+name = "TLSupporter"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+parking_lot = "0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rmp-serde = "1"
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+rayon = "1"
+bytes = "1"
+rfd = "0.15"
+
+# network
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros", "io-util"] }
+quinn = { version = "0.11", default-features = false, features = ["rustls-ring", "runtime-tokio"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rcgen = { version = "0.13", default-features = false, features = ["ring"] }
+ring = "0.17"
+if-addrs = "0.13"
+ureq = { version = "2", default-features = false, features = ["tls", "json"] }
+
+# media
+audiopus = "0.3.0-rc.0"
+jpeg-encoder = { version = "0.6", features = ["simd"] }
+zune-jpeg = "0.4"
+tiny-skia = "0.11"
+fontdue = "0.9"
+
+# ui
+eframe = { version = "0.29", default-features = false, features = ["glow", "default_fonts"] }
+egui = "0.29"
+
+windows-core = "0.58"
+
+[dependencies.windows]
+version = "0.58"
+features = [
+  "implement",
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Cryptography",
+  "Win32_System_Com",
+  "Win32_System_Com_StructuredStorage",
+  "Win32_System_Variant",
+  "Win32_System_Threading",
+  "Win32_System_LibraryLoader",
+  "Win32_System_RemoteDesktop",
+  "Win32_System_StationsAndDesktops",
+  "Win32_System_Environment",
+  "Win32_System_DataExchange",
+  "Win32_System_Memory",
+  "Win32_System_Ole",
+  "Win32_System_SystemInformation",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_UI_Shell",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_HiDpi",
+  "Win32_Graphics_Gdi",
+  "Win32_Graphics_Dxgi",
+  "Win32_Graphics_Dxgi_Common",
+  "Win32_Graphics_Direct3D",
+  "Win32_Graphics_Direct3D11",
+  "Win32_Media_Audio",
+  "Win32_Media_KernelStreaming",
+  "Win32_Media_Multimedia",
+  "Win32_Devices_FunctionDiscovery",
+  "Win32_UI_Shell_PropertiesSystem",
+  "Win32_System_Registry",
+  "Win32_Storage_FileSystem",
+]
+
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.7"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+strip = true
+panic = "unwind"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
