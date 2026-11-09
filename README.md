@@ -28,6 +28,8 @@ The program is free of charge, a free license is planned for later.
 - Lead rights, an action journal, console lock and auto-lock, an admin password on the employee's PC.
 - Adding a PC with a one-time code, presets for quick installation, settings backup.
 - Autostart as a Windows service, the employee sees only a tray icon.
+- The program closes completely only with the team admin password. The window's close button just minimizes it.
+- A lead's PC can switch to employee mode and back with the team admin password.
 - Updates: a lead's PC downloads a signed version from GitHub and distributes it over the local network.
 
 ### How it works
@@ -120,6 +122,8 @@ The "client hears" mode needs a signed virtual microphone driver. Its button in 
 - Права керівників, журнал дій, блокування консолі й автоблокування, адмінський пароль на ПК працівника.
 - Додавання ПК за одноразовим кодом, пресети для швидкого встановлення, резервна копія налаштувань.
 - Автозапуск як служба Windows, у працівника лише значок у треї.
+- Повністю програма закривається лише з адмінським паролем команди. Хрестик вікна її тільки згортає.
+- ПК керівника можна перевести в режим працівника і повернути назад з адмінським паролем команди.
 - Оновлення: ПК керівника завантажує підписану версію з GitHub і роздає її в локальній мережі.
 
 ### Як це влаштовано
