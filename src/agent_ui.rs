@@ -345,7 +345,12 @@ fn tray_icon(rgb: [u8; 3]) -> HICON {
 
 /// Bring the lead console to the front.
 pub fn restore_console_window() {
-    let title = wide(CONSOLE_TITLE);
+    restore_window(CONSOLE_TITLE);
+}
+
+/// Show a window of this program and bring it to the front.
+pub fn restore_window(title: &str) {
+    let title = wide(title);
     unsafe {
         if let Ok(h) = FindWindowW(None, PCWSTR(title.as_ptr())) {
             let _ = ShowWindow(h, SW_RESTORE);
@@ -811,6 +816,9 @@ impl Ui {
             }
             let _ = AppendMenuW(menu, MF_STRING, 2, w!("Потрібна допомога"));
             let _ = AppendMenuW(menu, MF_STRING, 3, w!("Налаштування…"));
+            if self.is_lead_pc {
+                let _ = AppendMenuW(menu, MF_STRING, 4, w!("Вийти з програми…"));
+            }
             let mut p = POINT::default();
             let _ = GetCursorPos(&mut p);
             let _ = SetForegroundWindow(self.tray_hwnd);
@@ -819,7 +827,8 @@ impl Ui {
             match cmd.0 {
                 1 => restore_console_window(),
                 2 => self.node.agent_request_help(String::new()),
-                3 => open_settings_process(),
+                // Leaving the program always goes through the admin password in that window.
+                3 | 4 => open_settings_process(),
                 _ => {}
             }
         }

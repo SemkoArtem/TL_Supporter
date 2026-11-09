@@ -13,6 +13,12 @@ pub fn create_team(identity: &Identity, team: &str, password: &str) -> Result<()
     model::save_state(&LocalState { display_name: "Керівник Тест".into(), directory, ..Default::default() })
 }
 
+pub fn employee_mode(value: &str) -> Result<()> {
+    let mut st = model::load_state();
+    st.work_as_agent = value == "on";
+    model::save_state(&st)
+}
+
 pub fn export_preset(path: &str, password: &str, lead: bool) -> Result<()> {
     let st = model::load_state();
     let preset = Preset {

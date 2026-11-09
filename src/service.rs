@@ -26,6 +26,11 @@ use windows_service::{define_windows_service, service_dispatcher};
 pub const SERVICE_NAME: &str = "TLSupporter";
 /// Exit code that means "stopped on purpose, do not restart until the next sign-in".
 pub const EXIT_STOPPED: u32 = 77;
+/// Exit code that means "another copy already runs in this session".
+pub const EXIT_BUSY: u32 = 78;
+/// A program that ended this quickly did not really start, so the service waits before retrying.
+const QUICK_EXIT: Duration = Duration::from_secs(5);
+const RETRY_DELAY: Duration = Duration::from_secs(10);
 
 define_windows_service!(ffi_service_main, service_main);
 
@@ -55,6 +60,14 @@ fn status(state: ServiceState, accept: ServiceControlAccept, code: u32) -> Servi
 struct Child {
     process: HANDLE,
     session: u32,
+    started: Instant,
+}
+
+/// How a watched process ended.
+struct Ended {
+    code: u32,
+    session: u32,
+    quick: bool,
 }
 
 fn start_in_session(session: u32, exe: &str) -> Result<Child> {
@@ -71,10 +84,11 @@ fn start_in_session(session: u32, exe: &str) -> Result<Child> {
         };
         let mut info = PROCESS_INFORMATION::default();
         let app = wide(exe);
+        let mut command = wide(&format!("\"{exe}\" --from-service"));
         let result = CreateProcessAsUserW(
             token,
             PCWSTR(app.as_ptr()),
-            PWSTR::null(),
+            PWSTR(command.as_mut_ptr()),
             None,
             None,
             false,
@@ -90,7 +104,7 @@ fn start_in_session(session: u32, exe: &str) -> Result<Child> {
         let _ = CloseHandle(token);
         result?;
         let _ = CloseHandle(info.hThread);
-        Ok(Child { process: info.hProcess, session })
+        Ok(Child { process: info.hProcess, session, started: Instant::now() })
     }
 }
 
@@ -130,7 +144,7 @@ fn start_system_agent(session: u32, exe: &str) -> Result<Child> {
         let _ = CloseHandle(token);
         result?;
         let _ = CloseHandle(info.hThread);
-        Ok(Child { process: info.hProcess, session })
+        Ok(Child { process: info.hProcess, session, started: Instant::now() })
     }
 }
 
@@ -143,15 +157,15 @@ fn stop_child(child: &mut Option<Child>) {
     }
 }
 
-/// Clears `child` if it has ended or belongs to another session. Returns its exit code if it ended.
-fn check_child(child: &mut Option<Child>, session: u32) -> Option<(u32, u32)> {
+/// Clears `child` if it has ended or belongs to another session. Says how it ended, if it did.
+fn check_child(child: &mut Option<Child>, session: u32) -> Option<Ended> {
     let c = child.as_ref()?;
     let mut code = 0u32;
     unsafe {
         let _ = GetExitCodeProcess(c.process, &mut code);
     }
     if code != STILL_ACTIVE.0 as u32 {
-        let ended = (code, c.session);
+        let ended = Ended { code, session: c.session, quick: c.started.elapsed() < QUICK_EXIT };
         unsafe {
             let _ = CloseHandle(c.process);
         }
@@ -198,6 +212,8 @@ fn service_body() -> Result<()> {
     let mut child: Option<Child> = None;
     let mut system_child: Option<Child> = None;
     let mut stopped_in: Option<u32> = None;
+    let mut child_retry = Instant::now();
+    let mut system_retry = Instant::now();
     let mut last_update_check = Instant::now();
     let mut updated = false;
 
@@ -210,24 +226,28 @@ fn service_body() -> Result<()> {
         if stopped_in.is_some() && stopped_in != Some(session) {
             stopped_in = None;
         }
-        if let Some((code, ended_session)) = check_child(&mut child, session) {
-            if code == EXIT_STOPPED {
-                stopped_in = Some(ended_session);
+        if let Some(ended) = check_child(&mut child, session) {
+            if ended.code == EXIT_STOPPED {
+                stopped_in = Some(ended.session);
+            } else if ended.code == EXIT_BUSY || ended.quick {
+                child_retry = Instant::now() + RETRY_DELAY;
             }
         }
-        check_child(&mut system_child, session);
+        if check_child(&mut system_child, session).is_some_and(|e| e.quick) {
+            system_retry = Instant::now() + RETRY_DELAY;
+        }
         if stopped_in.is_some() {
-            // Closing the program with the admin password also closes secure access.
+            // Closing the program on purpose also closes secure access.
             stop_child(&mut system_child);
         } else {
-            if system_child.is_none() {
+            if system_child.is_none() && Instant::now() >= system_retry {
                 match start_system_agent(session, &exe) {
                     Ok(c) => system_child = Some(c),
                     Err(e) => crate::logi!("secure agent start failed: {e}"),
                 }
             }
             // Fails while nobody is signed in, which is fine: the next pass tries again.
-            if child.is_none() {
+            if child.is_none() && Instant::now() >= child_retry {
                 if let Ok(c) = start_in_session(session, &exe) {
                     child = Some(c);
                 }
@@ -251,6 +271,24 @@ fn service_body() -> Result<()> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+fn is_running() -> bool {
+    ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+        .ok()
+        .and_then(|m| m.open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS).ok())
+        .and_then(|s| s.query_status().ok())
+        .is_some_and(|s| s.current_state == ServiceState::Running)
+}
+
+/// Close this copy and open it again. The service does that by itself when it is running.
+pub fn restart_program() -> ! {
+    if !is_running() {
+        if let Ok(exe) = std::env::current_exe() {
+            let _ = std::process::Command::new(exe).arg("--restarted").spawn();
+        }
+    }
+    std::process::exit(0)
 }
 
 pub fn is_admin() -> bool {

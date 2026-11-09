@@ -7,6 +7,8 @@ use crate::theme;
 use eframe::egui::{self, Color32, RichText};
 
 pub const EXIT_FLAG: &str = "exit.flag";
+pub const RESTART_FLAG: &str = "restart.flag";
+pub const SETTINGS_TITLE: &str = "Налаштування TL Supporter";
 
 fn options(title: &str, w: f32, h: f32) -> eframe::NativeOptions {
     eframe::NativeOptions {
@@ -108,7 +110,7 @@ pub fn state_from_preset(identity: &Identity, path: &std::path::Path, password: 
             },
         );
     }
-    Ok(LocalState { display_name: display, directory, lead: p.lead.unwrap_or_default(), agent_sound: None })
+    Ok(LocalState { display_name: display, directory, lead: p.lead.unwrap_or_default(), ..Default::default() })
 }
 
 impl eframe::App for Setup {
@@ -273,6 +275,14 @@ impl eframe::App for Settings {
                 }
             } else {
                 ui.label(RichText::new("Адмінський режим").strong());
+                if st.role(&self.id) == Some(Role::Lead) && st.work_as_agent && ui.button("Повернутись у режим керівника").clicked() {
+                    let mut fresh = model::load_state();
+                    fresh.work_as_agent = false;
+                    if model::save_state(&fresh).is_ok() {
+                        let _ = std::fs::write(crate::util::data_dir().join(RESTART_FLAG), b"1");
+                        self.message = "Зараз відкриється консоль керівника.".into();
+                    }
+                }
                 if ui.button("Вийти з програми до наступного входу в Windows").clicked() {
                     let _ = std::fs::write(crate::util::data_dir().join(EXIT_FLAG), b"1");
                     self.message = "Програму буде закрито.".into();
@@ -297,7 +307,7 @@ fn secure_check(st: &LocalState, password: &str) -> bool {
 pub fn run_settings(identity: Identity) {
     let _ = eframe::run_native(
         "TL Supporter",
-        options("Налаштування TL Supporter", 460.0, 340.0),
+        options(SETTINGS_TITLE, 460.0, 380.0),
         Box::new(move |cc| {
             theme::apply(&cc.egui_ctx);
             Ok(Box::new(Settings { id: identity.id, password: String::new(), unlocked: false, error: String::new(), message: String::new() }))

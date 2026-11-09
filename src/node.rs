@@ -110,6 +110,49 @@ impl Node {
         self.state.read().directory.is_approved_lead(&self.identity.id)
     }
 
+    /// This lead's PC works as an employee's PC for now.
+    pub fn acting_as_agent(&self) -> bool {
+        self.state.read().work_as_agent
+    }
+
+    /// Reopen this PC as an employee's PC. Returning needs the team admin password.
+    pub fn switch_to_employee_mode(self: &Arc<Self>) -> ! {
+        self.audit_log("—", "Перехід у режим працівника");
+        self.state.write().work_as_agent = true;
+        self.save();
+        crate::service::restart_program()
+    }
+
+    /// Other leads see only PCs that have a group, so employee mode needs one.
+    /// A group given just for this mode is taken away again when the lead returns.
+    pub fn sync_employee_mode(self: &Arc<Self>) {
+        if !self.is_lead() {
+            return;
+        }
+        let (acting, auto, no_group, first) = {
+            let st = self.state.read();
+            let no_group = st.directory.member(&self.identity.id).is_some_and(|m| m.group.is_empty());
+            let first = st.directory.groups.values().find(|g| !g.deleted).map(|g| g.id.clone());
+            (st.work_as_agent, st.agent_group_auto, no_group, first)
+        };
+        let group = if acting && no_group {
+            first
+        } else if !acting && auto {
+            Some(String::new())
+        } else {
+            None
+        };
+        let Some(group) = group else { return };
+        self.update_directory(|d, me| {
+            if let Some(m) = d.members.get_mut(me) {
+                m.group = group;
+                m.rev = Rev::new(me);
+            }
+        });
+        self.state.write().agent_group_auto = acting;
+        self.save();
+    }
+
     pub fn my_name(&self) -> String {
         self.state.read().directory.member(&self.identity.id).map(|m| m.name.clone()).unwrap_or_default()
     }
@@ -561,7 +604,8 @@ impl Node {
             None => false,
             Some(m) if m.state == MemberState::Revoked => false,
             Some(m) if m.role == Role::Lead && m.state == MemberState::Approved => self.identity.id < m.id,
-            Some(_) => true,
+            // In employee mode this PC only keeps its link with other leads.
+            Some(_) => !st.work_as_agent,
         }
     }
 
@@ -640,7 +684,7 @@ impl Node {
             Disc::JoinReq { code_tag, id, public_b64, name, mac } => self.handle_join(socket, code_tag, id, public_b64, name, mac, src).await,
             Disc::JoinOk { .. } => {}
             Disc::SecurePong { tag, id, port, mac } => {
-                if !self.is_lead() || !self.has_full_access() || id == self.identity.id {
+                if !self.is_lead() || self.acting_as_agent() || !self.has_full_access() || id == self.identity.id {
                     return;
                 }
                 let (key, my_tag, reachable) = {

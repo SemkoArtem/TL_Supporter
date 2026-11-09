@@ -52,6 +52,8 @@ struct SettingsDraft {
     reasons: String,
     new_console_pw: String,
     new_admin_pw: String,
+    confirm_employee_mode: bool,
+    exit_pw: String,
     new_group: String,
     new_set: String,
     phrase_edit: HashMap<String, String>,
@@ -1007,6 +1009,36 @@ impl LeadApp {
                 self.draft.message = "Адмінський пароль змінено.".into();
             }
         });
+        ui.add_space(12.0);
+        ui.heading("Робота програми");
+        ui.weak("Хрестик лише згортає вікно. Для повного виходу потрібен адмінський пароль команди. Програма запуститься знову при наступному вході в Windows.");
+        ui.horizontal(|ui| {
+            ui.add(egui::TextEdit::singleline(&mut self.draft.exit_pw).password(true).desired_width(220.0).hint_text("Адмінський пароль"));
+            if ui.button("Вийти з програми").clicked() {
+                let admin = self.node.state.read().directory.policy.admin_password.clone();
+                if !self.draft.exit_pw.is_empty() && secure::check_password(&admin, &self.draft.exit_pw) {
+                    self.node.audit_log("—", "Вихід із програми");
+                    std::process::exit(crate::service::EXIT_STOPPED as i32);
+                }
+                self.draft.exit_pw.clear();
+                self.draft.message = "Невірний адмінський пароль.".into();
+            }
+        });
+        ui.add_space(8.0);
+        if self.draft.confirm_employee_mode {
+            ui.label("Цей ПК працюватиме як ПК працівника: лише значок у треї, а інші керівники зможуть до нього підключатись.");
+            ui.weak("Повернутись: значок у треї → Налаштування, адмінський пароль команди, «Повернутись у режим керівника».");
+            ui.horizontal(|ui| {
+                if ui.button("Так, перейти").clicked() {
+                    self.node.switch_to_employee_mode();
+                }
+                if ui.button("Скасувати").clicked() {
+                    self.draft.confirm_employee_mode = false;
+                }
+            });
+        } else if ui.button("Перейти в режим працівника").clicked() {
+            self.draft.confirm_employee_mode = true;
+        }
     }
 
     fn settings_mic(&mut self, ui: &mut egui::Ui) {

@@ -338,11 +338,20 @@ pub struct LocalState {
     pub directory: Directory,
     pub lead: LeadSettings,
     pub agent_sound: Option<bool>,
+    /// A lead's PC temporarily working as an employee's PC. The team role itself does not change.
+    pub work_as_agent: bool,
+    /// The group was assigned only for employee mode, so it is cleared on the way back.
+    pub agent_group_auto: bool,
 }
 
 impl LocalState {
     pub fn role(&self, id: &str) -> Option<Role> {
         self.directory.member(id).map(|m| m.role)
+    }
+
+    /// Should this PC open the lead console?
+    pub fn console_mode(&self, id: &str) -> bool {
+        self.role(id) == Some(Role::Lead) && !self.work_as_agent
     }
 }
 
@@ -461,6 +470,17 @@ pub fn open_backup(password: &str, blob: &[u8]) -> Result<Backup> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn employee_mode_turns_off_console_but_keeps_lead_role() {
+        let id = identity(1);
+        let directory = Directory::new("T", &id, "L", String::new()).unwrap();
+        let mut st = LocalState { directory, ..Default::default() };
+        assert!(st.console_mode(&id.id));
+        st.work_as_agent = true;
+        assert!(!st.console_mode(&id.id));
+        assert!(st.directory.is_approved_lead(&id.id));
+    }
 
     fn identity(tag: u8) -> secure::Identity {
         let public = vec![tag; 32];

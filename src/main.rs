@@ -21,12 +21,11 @@ mod theme;
 mod update;
 mod util;
 
-use crate::model::Role;
 use crate::secure::Identity;
 use anyhow::Result;
 use eframe::egui;
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
+use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS};
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
 use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
@@ -42,28 +41,52 @@ fn arg_value(args: &[String], name: &str) -> Option<String> {
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned()
 }
 
-/// Returns false when another copy already runs in this session.
-fn single_instance() -> bool {
-    let name = format!("Local\\TLSupporter-{}", util::data_dir().to_string_lossy().replace(['\\', ':'], "_"));
+/// Returns false when this kind of window or program already runs in this session.
+/// A mutex made by a copy with other rights cannot be opened, which also means it is running.
+fn take_instance(kind: &str) -> bool {
+    let name = format!("Local\\TLSupporter-{kind}{}", util::data_dir().to_string_lossy().replace(['\\', ':'], "_"));
     let wide_name = util::wide(&name);
     unsafe {
-        let handle = CreateMutexW(None, false, PCWSTR(wide_name.as_ptr()));
+        let result = CreateMutexW(None, false, PCWSTR(wide_name.as_ptr()));
         let exists = GetLastError() == ERROR_ALREADY_EXISTS;
-        std::mem::forget(handle);
-        !exists
+        match result {
+            Err(_) => false,
+            Ok(handle) if exists => {
+                let _ = CloseHandle(handle);
+                false
+            }
+            // The handle stays open for the life of the process.
+            Ok(_) => true,
+        }
     }
 }
 
-/// Exit quietly when the settings window asks for it. The service then leaves the program closed.
+/// Open the settings window, or bring it to the front when it is already open.
+fn open_settings(identity: Identity) {
+    if take_instance("settings-") {
+        setup_ui::run_settings(identity);
+    } else {
+        agent_ui::restore_window(setup_ui::SETTINGS_TITLE);
+    }
+}
+
+/// Exit quietly when the settings window asks for it.
 fn watch_exit_flag() {
     std::thread::spawn(|| {
-        let path = util::data_dir().join(setup_ui::EXIT_FLAG);
-        let _ = std::fs::remove_file(&path);
+        let exit = util::data_dir().join(setup_ui::EXIT_FLAG);
+        let restart = util::data_dir().join(setup_ui::RESTART_FLAG);
+        let _ = std::fs::remove_file(&exit);
+        let _ = std::fs::remove_file(&restart);
         loop {
             std::thread::sleep(std::time::Duration::from_secs(1));
-            if path.exists() {
-                let _ = std::fs::remove_file(&path);
+            if exit.exists() {
+                let _ = std::fs::remove_file(&exit);
+                // The service then leaves the program closed until the next sign-in.
                 std::process::exit(service::EXIT_STOPPED as i32);
+            }
+            if restart.exists() {
+                let _ = std::fs::remove_file(&restart);
+                service::restart_program();
             }
         }
     });
@@ -71,11 +94,11 @@ fn watch_exit_flag() {
 
 fn run_app(identity: Identity) -> Result<()> {
     let state = model::load_state();
-    let role = state.role(&identity.id).unwrap_or(Role::Agent);
-    let is_lead = role == Role::Lead;
+    let is_lead = state.console_mode(&identity.id);
     let title = state.directory.team_name.clone();
     let (ui_handle, rx) = agent_ui::UiHandle::new();
     let node = node::start(identity, state, ui_handle.clone())?;
+    node.sync_employee_mode();
     watch_exit_flag();
     if is_lead {
         let ui_node = node.clone();
@@ -133,18 +156,35 @@ fn real_main() -> Result<()> {
             Some("--dev-secure-e2e") => return devtest::run_secure_e2e(identity, &args[1]),
             Some("--dev-join") => return devtest::join(&identity, &args[1], &args[2]),
             Some("--dev-serve-code") => return devtest::serve_code(identity, args[1].parse()?),
+            Some("--dev-employee-mode") => return devtest::employee_mode(&args[1]),
             _ => {}
         }
     }
     if flag("--settings") {
-        setup_ui::run_settings(identity);
+        open_settings(identity);
         return Ok(());
     }
-    if !single_instance() {
-        // The program already runs here, so an extra launch just opens the settings window.
-        agent_ui::restore_console_window();
-        if model::load_state().role(&identity.id) != Some(Role::Lead) {
-            setup_ui::run_settings(identity);
+    let mut free = take_instance("");
+    if !free && flag("--restarted") {
+        // The previous copy is still closing.
+        for _ in 0..40 {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            free = take_instance("");
+            if free {
+                break;
+            }
+        }
+    }
+    if !free {
+        // A launch by the service must stay invisible, otherwise it would open windows again and again.
+        if flag("--from-service") {
+            std::process::exit(service::EXIT_BUSY as i32);
+        }
+        // The program already runs here, so an extra launch only shows its window.
+        if model::load_state().console_mode(&identity.id) {
+            agent_ui::restore_console_window();
+        } else {
+            open_settings(identity);
         }
         return Ok(());
     }
@@ -171,7 +211,7 @@ fn main() {
     }
     if let Err(e) = real_main() {
         logi!("fatal: {e:#}");
-        if !std::env::args().any(|a| a == "--service") {
+        if !std::env::args().any(|a| a == "--service" || a == "--from-service") {
             message(&format!("Помилка запуску: {e}"));
         }
         std::process::exit(1);

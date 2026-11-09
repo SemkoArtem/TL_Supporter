@@ -531,7 +531,7 @@ impl Node {
         loop {
             tick.tick().await;
             n += 1;
-            if !self.is_lead() {
+            if !self.is_lead() || self.acting_as_agent() {
                 continue;
             }
             let (ptt, toggle) = {
