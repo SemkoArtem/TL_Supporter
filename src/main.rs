@@ -164,6 +164,14 @@ fn real_main() -> Result<()> {
         open_settings(identity);
         return Ok(());
     }
+    if flag("--exit-prompt") {
+        if take_instance("exit-") {
+            setup_ui::run_exit_prompt();
+        } else {
+            agent_ui::restore_window(setup_ui::EXIT_TITLE);
+        }
+        return Ok(());
+    }
     let mut free = take_instance("");
     if !free && flag("--restarted") {
         // The previous copy is still closing.

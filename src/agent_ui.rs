@@ -16,7 +16,7 @@ use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Threading::GetCurrentThreadId;
+use windows::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -353,10 +353,44 @@ pub fn restore_window(title: &str) {
     let title = wide(title);
     unsafe {
         if let Ok(h) = FindWindowW(None, PCWSTR(title.as_ptr())) {
-            let _ = ShowWindow(h, SW_RESTORE);
+            // SW_RESTORE would turn a maximized window that was only hidden into a smaller one.
+            let _ = ShowWindow(h, if IsIconic(h).as_bool() { SW_RESTORE } else { SW_SHOW });
             let _ = SetForegroundWindow(h);
         }
     }
+}
+
+/// The console window of this very process.
+fn own_console_window() -> Option<HWND> {
+    let title = wide(CONSOLE_TITLE);
+    let mut after = HWND::default();
+    unsafe {
+        loop {
+            let h = FindWindowExW(HWND::default(), after, PCWSTR::null(), PCWSTR(title.as_ptr())).ok()?;
+            if h.0.is_null() {
+                return None;
+            }
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(h, Some(&mut pid));
+            if pid == GetCurrentProcessId() {
+                return Some(h);
+            }
+            after = h;
+        }
+    }
+}
+
+/// Hide the console so that only the tray icon stays.
+pub fn hide_console_window() {
+    if let Some(h) = own_console_window() {
+        unsafe {
+            let _ = ShowWindow(h, SW_HIDE);
+        }
+    }
+}
+
+pub fn console_visible() -> bool {
+    own_console_window().map(|h| unsafe { IsWindowVisible(h).as_bool() }).unwrap_or(false)
 }
 
 /// Blink the console button on the taskbar without taking the lead away from what they do.
@@ -364,6 +398,10 @@ pub fn flash_console_window() {
     let title = wide(CONSOLE_TITLE);
     unsafe {
         if let Ok(h) = FindWindowW(None, PCWSTR(title.as_ptr())) {
+            // A console hidden in the tray has no taskbar button to blink, so give it one.
+            if !IsWindowVisible(h).as_bool() {
+                let _ = ShowWindow(h, SW_SHOWMINNOACTIVE);
+            }
             let info = FLASHWINFO {
                 cbSize: std::mem::size_of::<FLASHWINFO>() as u32,
                 hwnd: h,
@@ -373,6 +411,13 @@ pub fn flash_console_window() {
             };
             let _ = FlashWindowEx(&info);
         }
+    }
+}
+
+/// Ask for the team admin password and close the program if it is right.
+pub fn open_exit_prompt() {
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = std::process::Command::new(exe).arg("--exit-prompt").spawn();
     }
 }
 
@@ -816,9 +861,7 @@ impl Ui {
             }
             let _ = AppendMenuW(menu, MF_STRING, 2, w!("Потрібна допомога"));
             let _ = AppendMenuW(menu, MF_STRING, 3, w!("Налаштування…"));
-            if self.is_lead_pc {
-                let _ = AppendMenuW(menu, MF_STRING, 4, w!("Вийти з програми…"));
-            }
+            let _ = AppendMenuW(menu, MF_STRING, 4, w!("Закрити програму…"));
             let mut p = POINT::default();
             let _ = GetCursorPos(&mut p);
             let _ = SetForegroundWindow(self.tray_hwnd);
@@ -827,8 +870,8 @@ impl Ui {
             match cmd.0 {
                 1 => restore_console_window(),
                 2 => self.node.agent_request_help(String::new()),
-                // Leaving the program always goes through the admin password in that window.
-                3 | 4 => open_settings_process(),
+                3 => open_settings_process(),
+                4 => open_exit_prompt(),
                 _ => {}
             }
         }

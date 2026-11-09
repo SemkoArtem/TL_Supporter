@@ -9,6 +9,7 @@ use eframe::egui::{self, Color32, RichText};
 pub const EXIT_FLAG: &str = "exit.flag";
 pub const RESTART_FLAG: &str = "restart.flag";
 pub const SETTINGS_TITLE: &str = "Налаштування TL Supporter";
+pub const EXIT_TITLE: &str = "Закрити TL Supporter";
 
 fn options(title: &str, w: f32, h: f32) -> eframe::NativeOptions {
     eframe::NativeOptions {
@@ -302,6 +303,59 @@ impl eframe::App for Settings {
 
 fn secure_check(st: &LocalState, password: &str) -> bool {
     secure::check_password(&st.directory.policy.admin_password, password)
+}
+
+struct ExitPrompt {
+    password: String,
+    error: String,
+    focused: bool,
+}
+
+impl eframe::App for ExitPrompt {
+    fn update(&mut self, ctx: &egui::Context, _f: &mut eframe::Frame) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.label("Щоб закрити програму, введи адмінський пароль команди:");
+            ui.add_space(6.0);
+            let field = ui.add(egui::TextEdit::singleline(&mut self.password).password(true).desired_width(f32::INFINITY));
+            if !self.focused {
+                field.request_focus();
+                self.focused = true;
+            }
+            let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if !self.error.is_empty() {
+                ui.colored_label(Color32::from_rgb(232, 17, 35), &self.error);
+            }
+            ui.add_space(8.0);
+            let mut close = enter;
+            ui.horizontal(|ui| {
+                close |= ui.button("Закрити програму").clicked();
+                if ui.button("Скасувати").clicked() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            });
+            if close {
+                if !self.password.is_empty() && secure_check(&model::load_state(), &self.password) {
+                    let _ = std::fs::write(crate::util::data_dir().join(EXIT_FLAG), b"1");
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                } else {
+                    self.error = "Невірний пароль".into();
+                    self.password.clear();
+                    self.focused = false;
+                }
+            }
+        });
+    }
+}
+
+pub fn run_exit_prompt() {
+    let _ = eframe::run_native(
+        "TL Supporter",
+        options(EXIT_TITLE, 400.0, 150.0),
+        Box::new(|cc| {
+            theme::apply(&cc.egui_ctx);
+            Ok(Box::new(ExitPrompt { password: String::new(), error: String::new(), focused: false }))
+        }),
+    );
 }
 
 pub fn run_settings(identity: Identity) {
