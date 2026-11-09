@@ -729,17 +729,17 @@ impl Ui {
             let lines = &hint_lines[i];
             let box_h = 58.0 + lines.len() as f32 * 19.0;
             let bg = Rect::from_xywh(0.0, y, PANEL_W as f32, box_h).unwrap();
-            fill(&mut pix, &mut paint, bg, [255, 255, 255, 250]);
+            fill(&mut pix, &mut paint, bg, [31, 31, 31, 245]);
             let c = hint.color;
             fill(&mut pix, &mut paint, Rect::from_xywh(0.0, y, 5.0, box_h).unwrap(), [c[0], c[1], c[2], 255]);
             font.draw(&mut pix, &hint.name, 15.0, y + 20.0, 13.0, c);
             for (n, line) in lines.iter().enumerate() {
-                font.draw(&mut pix, line, 15.0, y + 40.0 + n as f32 * 19.0, body, [30, 30, 30]);
+                font.draw(&mut pix, line, 15.0, y + 40.0 + n as f32 * 19.0, body, [242, 242, 242]);
             }
             let btn_y = y + box_h - 24.0;
-            font.draw(&mut pix, "Копіювати", 15.0, btn_y + 15.0, 12.0, [0, 120, 215]);
+            font.draw(&mut pix, "Копіювати", 15.0, btn_y + 15.0, 12.0, [96, 205, 255]);
             self.actions.push((Rect::from_xywh(10.0, btn_y, 80.0, 22.0).unwrap(), Action::CopyHint(i)));
-            font.draw(&mut pix, "Закрити", PANEL_W as f32 - 62.0, btn_y + 15.0, 12.0, [0, 120, 215]);
+            font.draw(&mut pix, "Закрити", PANEL_W as f32 - 62.0, btn_y + 15.0, 12.0, [96, 205, 255]);
             self.actions.push((Rect::from_xywh(PANEL_W as f32 - 70.0, btn_y, 65.0, 22.0).unwrap(), Action::CloseHint(i)));
             y += box_h + 6.0;
         }
@@ -750,7 +750,7 @@ impl Ui {
         }
         for a in &activity {
             let c = crate::util::color_for(&a.id);
-            fill(&mut pix, &mut paint, Rect::from_xywh(0.0, y, PANEL_W as f32, 28.0).unwrap(), [255, 255, 255, 240]);
+            fill(&mut pix, &mut paint, Rect::from_xywh(0.0, y, PANEL_W as f32, 28.0).unwrap(), [31, 31, 31, 235]);
             fill(&mut pix, &mut paint, Rect::from_xywh(0.0, y, 5.0, 28.0).unwrap(), [c[0], c[1], c[2], 255]);
             let verb = if a.controlling {
                 "керує"
@@ -759,13 +759,13 @@ impl Ui {
             } else {
                 "малює"
             };
-            font.draw(&mut pix, &format!("{}: {verb}", a.name), 14.0, y + 19.0, 13.0, [30, 30, 30]);
+            font.draw(&mut pix, &format!("{}: {verb}", a.name), 14.0, y + 19.0, 13.0, [242, 242, 242]);
             y += 30.0;
         }
         if !self.items.is_empty() && self.policy.allow_hide_key || self.hidden_until.is_some() {
             let label = if self.hidden_until.is_some() { "Показати малюнки" } else { "Сховати малюнки" };
-            fill(&mut pix, &mut paint, Rect::from_xywh(0.0, y, PANEL_W as f32, 28.0).unwrap(), [240, 240, 240, 245]);
-            font.draw(&mut pix, label, 12.0, y + 19.0, 13.0, [30, 30, 30]);
+            fill(&mut pix, &mut paint, Rect::from_xywh(0.0, y, PANEL_W as f32, 28.0).unwrap(), [51, 51, 51, 245]);
+            font.draw(&mut pix, label, 12.0, y + 19.0, 13.0, [242, 242, 242]);
             self.actions.push((Rect::from_xywh(0.0, y, PANEL_W as f32, 28.0).unwrap(), Action::HideDrawings));
             y += 32.0;
         }
@@ -773,15 +773,15 @@ impl Ui {
             let mut labels: Vec<(String, String)> = vec![("Без причини".to_string(), String::new())];
             labels.extend(self.policy.help_reasons.iter().map(|r| (r.clone(), r.clone())));
             for (label, reason) in labels {
-                fill(&mut pix, &mut paint, Rect::from_xywh(0.0, y, PANEL_W as f32, 30.0).unwrap(), [255, 255, 255, 250]);
-                font.draw(&mut pix, &label, 12.0, y + 20.0, 13.0, [30, 30, 30]);
+                fill(&mut pix, &mut paint, Rect::from_xywh(0.0, y, PANEL_W as f32, 30.0).unwrap(), [31, 31, 31, 245]);
+                font.draw(&mut pix, &label, 12.0, y + 20.0, 13.0, [242, 242, 242]);
                 self.actions.push((Rect::from_xywh(0.0, y, PANEL_W as f32, 30.0).unwrap(), Action::HelpReason(reason)));
                 y += 32.0;
             }
         }
         if self.help_waiting {
-            fill(&mut pix, &mut paint, Rect::from_xywh(0.0, y, PANEL_W as f32, 28.0).unwrap(), [240, 240, 240, 245]);
-            font.draw(&mut pix, "Скасувати запит", 12.0, y + 19.0, 13.0, [30, 30, 30]);
+            fill(&mut pix, &mut paint, Rect::from_xywh(0.0, y, PANEL_W as f32, 28.0).unwrap(), [51, 51, 51, 245]);
+            font.draw(&mut pix, "Скасувати запит", 12.0, y + 19.0, 13.0, [242, 242, 242]);
             self.actions.push((Rect::from_xywh(0.0, y, PANEL_W as f32, 28.0).unwrap(), Action::HelpCancel));
             y += 32.0;
         }

@@ -4,7 +4,7 @@ use crate::model::{self, Directory, LocalState, MemberState, Role};
 use crate::node;
 use crate::secure::{self, Identity};
 use crate::theme;
-use eframe::egui::{self, Color32, RichText};
+use eframe::egui::{self, RichText};
 
 pub const EXIT_FLAG: &str = "exit.flag";
 pub const RESTART_FLAG: &str = "restart.flag";
@@ -25,7 +25,11 @@ fn request_exit() {
 
 fn options(title: &str, w: f32, h: f32) -> eframe::NativeOptions {
     eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_title(title).with_inner_size([w, h]).with_resizable(false),
+        viewport: egui::ViewportBuilder::default()
+            .with_title(title)
+            .with_inner_size([w, h])
+            .with_resizable(false)
+            .with_icon(egui::IconData { rgba: crate::agent_ui::icon_rgba(), width: 32, height: 32 }),
         renderer: eframe::Renderer::Glow,
         ..Default::default()
     }
@@ -195,7 +199,7 @@ impl eframe::App for Setup {
             }
             if !self.error.is_empty() {
                 ui.add_space(8.0);
-                ui.colored_label(Color32::from_rgb(232, 17, 35), &self.error);
+                ui.colored_label(theme::danger(), &self.error);
             }
         });
     }
@@ -210,7 +214,7 @@ pub fn run_setup(identity: Identity) -> bool {
         "TL Supporter",
         options("TL Supporter", 460.0, 380.0),
         Box::new(move |cc| {
-            theme::apply(&cc.egui_ctx);
+            theme::apply(&cc.egui_ctx, model::load_state().lead.light_theme);
             Ok(Box::new(Setup {
                 identity,
                 mode: Mode::Choose,
@@ -285,7 +289,7 @@ impl eframe::App for Settings {
                     }
                 });
                 if !self.error.is_empty() {
-                    ui.colored_label(Color32::from_rgb(232, 17, 35), &self.error);
+                    ui.colored_label(theme::danger(), &self.error);
                 }
             } else {
                 ui.label(RichText::new("Адмінський режим").strong());
@@ -336,7 +340,7 @@ impl eframe::App for ExitPrompt {
             }
             let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             if !self.error.is_empty() {
-                ui.colored_label(Color32::from_rgb(232, 17, 35), &self.error);
+                ui.colored_label(theme::danger(), &self.error);
             }
             ui.add_space(8.0);
             let mut close = enter;
@@ -365,7 +369,7 @@ pub fn run_exit_prompt() {
         "TL Supporter",
         options(EXIT_TITLE, 400.0, 150.0),
         Box::new(|cc| {
-            theme::apply(&cc.egui_ctx);
+            theme::apply(&cc.egui_ctx, model::load_state().lead.light_theme);
             Ok(Box::new(ExitPrompt { password: String::new(), error: String::new(), focused: false }))
         }),
     );
@@ -376,7 +380,7 @@ pub fn run_settings(identity: Identity) {
         "TL Supporter",
         options(SETTINGS_TITLE, 460.0, 380.0),
         Box::new(move |cc| {
-            theme::apply(&cc.egui_ctx);
+            theme::apply(&cc.egui_ctx, model::load_state().lead.light_theme);
             Ok(Box::new(Settings { id: identity.id, key: Default::default(), password: String::new(), unlocked: false, error: String::new(), message: String::new() }))
         }),
     );

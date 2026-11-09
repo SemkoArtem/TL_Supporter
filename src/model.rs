@@ -310,6 +310,7 @@ pub struct LeadSettings {
     pub grid_view: bool,
     pub mic_mode_client: bool,
     pub personal_phrases: Vec<String>,
+    pub light_theme: bool,
 }
 
 impl Default for LeadSettings {
@@ -326,6 +327,7 @@ impl Default for LeadSettings {
             grid_view: false,
             mic_mode_client: false,
             personal_phrases: Vec::new(),
+            light_theme: false,
         }
     }
 }

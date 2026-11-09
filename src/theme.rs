@@ -1,8 +1,12 @@
-//! Windows 10 look: Segoe UI, square corners, light surfaces and the standard blue accent.
+//! Windows 10 look: Segoe UI, square corners, a navigation pane and the standard blue accent.
+//! Dark by default, with a light variant in the settings.
 
 use eframe::egui::{self, Color32, FontData, FontDefinitions, FontFamily, Margin, Pos2, Rounding, Shape, Stroke, Vec2};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub const ACCENT: Color32 = Color32::from_rgb(0, 120, 215);
+const TITLE_FONT: &str = "title";
+static LIGHT: AtomicBool = AtomicBool::new(false);
 
 /// Glyphs from the Segoe MDL2 Assets font that ships with Windows 10.
 pub mod icon {
@@ -29,6 +33,9 @@ pub mod icon {
     pub const MINI: &str = "\u{E73F}";
     pub const PEOPLE: &str = "\u{E716}";
     pub const MORE: &str = "\u{E712}";
+    pub const MENU: &str = "\u{E700}";
+    pub const BRUSH: &str = "\u{E771}";
+    pub const SYNC: &str = "\u{E895}";
     pub const EYE: &str = "\u{E7B3}";
     pub const COPY: &str = "\u{E8C8}";
 }
@@ -81,7 +88,7 @@ fn load_font(fonts: &mut FontDefinitions, name: &str, path: &str) -> bool {
     }
 }
 
-pub fn apply(ctx: &egui::Context) {
+pub fn apply(ctx: &egui::Context, light: bool) {
     let mut fonts = FontDefinitions::default();
     if load_font(&mut fonts, "segoe", r"C:\Windows\Fonts\segoeui.ttf") {
         fonts.families.get_mut(&FontFamily::Proportional).unwrap().insert(0, "segoe".to_string());
@@ -89,43 +96,163 @@ pub fn apply(ctx: &egui::Context) {
     if load_font(&mut fonts, "mdl2", r"C:\Windows\Fonts\segmdl2.ttf") {
         fonts.families.get_mut(&FontFamily::Proportional).unwrap().push("mdl2".to_string());
     }
+    // Page titles in Windows 10 use the thin cut of Segoe UI.
+    let mut titles = fonts.families[&FontFamily::Proportional].clone();
+    if load_font(&mut fonts, "segoe_light", r"C:\Windows\Fonts\segoeuil.ttf") {
+        titles.insert(0, "segoe_light".to_string());
+    }
+    fonts.families.insert(FontFamily::Name(TITLE_FONT.into()), titles);
     ctx.set_fonts(fonts);
+    set_mode(ctx, light);
+}
+
+/// Switch between the dark and the light look. Also recolours the window's title bar.
+pub fn set_mode(ctx: &egui::Context, light: bool) {
+    LIGHT.store(light, Ordering::Relaxed);
+    ctx.set_theme(if light { egui::Theme::Light } else { egui::Theme::Dark });
+    ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(if light { egui::SystemTheme::Light } else { egui::SystemTheme::Dark }));
 
     let mut style = (*ctx.style()).clone();
-    style.spacing.item_spacing = Vec2::new(6.0, 6.0);
-    style.spacing.button_padding = Vec2::new(9.0, 4.0);
+    style.spacing.item_spacing = Vec2::new(8.0, 7.0);
+    style.spacing.button_padding = Vec2::new(11.0, 5.0);
+    style.spacing.interact_size.y = 26.0;
     style.text_styles.insert(egui::TextStyle::Body, egui::FontId::proportional(14.0));
     style.text_styles.insert(egui::TextStyle::Button, egui::FontId::proportional(14.0));
-    style.text_styles.insert(egui::TextStyle::Heading, egui::FontId::proportional(20.0));
+    style.text_styles.insert(egui::TextStyle::Heading, egui::FontId::new(24.0, FontFamily::Name(TITLE_FONT.into())));
 
-    let mut v = egui::Visuals::light();
+    let mut v = if light { egui::Visuals::light() } else { egui::Visuals::dark() };
     let square = Rounding::ZERO;
     v.window_rounding = square;
     v.menu_rounding = square;
-    v.panel_fill = Color32::from_rgb(250, 250, 250);
-    v.window_fill = Color32::WHITE;
-    v.extreme_bg_color = Color32::WHITE;
-    v.selection.bg_fill = Color32::from_rgb(204, 228, 247);
-    v.selection.stroke = Stroke::new(1.0_f32, Color32::from_rgb(20, 20, 20));
-    v.hyperlink_color = ACCENT;
+    v.hyperlink_color = if light { ACCENT } else { Color32::from_rgb(96, 205, 255) };
     for w in [&mut v.widgets.noninteractive, &mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
         w.rounding = square;
+        w.expansion = 0.0;
     }
-    v.widgets.inactive.weak_bg_fill = Color32::from_rgb(232, 232, 232);
-    v.widgets.inactive.bg_fill = Color32::from_rgb(232, 232, 232);
-    v.widgets.hovered.weak_bg_fill = Color32::from_rgb(218, 218, 218);
-    v.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, ACCENT);
-    v.widgets.active.weak_bg_fill = Color32::from_rgb(204, 204, 204);
+    if light {
+        v.panel_fill = Color32::from_rgb(250, 250, 250);
+        v.window_fill = Color32::WHITE;
+        v.extreme_bg_color = Color32::WHITE;
+        v.selection.bg_fill = Color32::from_rgb(204, 228, 247);
+        v.selection.stroke = Stroke::new(1.0_f32, Color32::from_rgb(20, 20, 20));
+        v.widgets.inactive.weak_bg_fill = Color32::from_rgb(230, 230, 230);
+        v.widgets.inactive.bg_fill = Color32::from_rgb(230, 230, 230);
+        v.widgets.hovered.weak_bg_fill = Color32::from_rgb(230, 230, 230);
+        v.widgets.hovered.bg_stroke = Stroke::new(2.0_f32, Color32::from_gray(122));
+        v.widgets.active.weak_bg_fill = Color32::from_rgb(204, 204, 204);
+    } else {
+        v.panel_fill = Color32::from_rgb(31, 31, 31);
+        v.window_fill = Color32::from_rgb(43, 43, 43);
+        v.faint_bg_color = Color32::from_rgb(43, 43, 43);
+        v.extreme_bg_color = Color32::from_rgb(10, 10, 10);
+        v.selection.bg_fill = Color32::from_rgb(0, 90, 158);
+        v.selection.stroke = Stroke::new(1.0_f32, Color32::WHITE);
+        v.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, Color32::from_gray(232));
+        v.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, Color32::from_gray(64));
+        v.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, Color32::from_gray(242));
+        v.widgets.inactive.weak_bg_fill = Color32::from_rgb(51, 51, 51);
+        v.widgets.inactive.bg_fill = Color32::from_rgb(51, 51, 51);
+        v.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, Color32::from_gray(64));
+        v.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, Color32::WHITE);
+        v.widgets.hovered.weak_bg_fill = Color32::from_rgb(51, 51, 51);
+        v.widgets.hovered.bg_fill = Color32::from_rgb(64, 64, 64);
+        v.widgets.hovered.bg_stroke = Stroke::new(2.0_f32, Color32::from_gray(133));
+        v.widgets.active.fg_stroke = Stroke::new(1.0_f32, Color32::WHITE);
+        v.widgets.active.weak_bg_fill = Color32::from_rgb(102, 102, 102);
+        v.widgets.active.bg_fill = Color32::from_rgb(102, 102, 102);
+        v.widgets.active.bg_stroke = Stroke::new(2.0_f32, Color32::from_gray(133));
+        v.widgets.open.weak_bg_fill = Color32::from_rgb(51, 51, 51);
+    }
     style.visuals = v;
     ctx.set_style(style);
 }
 
-pub fn bar_frame() -> egui::Frame {
-    egui::Frame::none().fill(Color32::from_rgb(240, 240, 240)).inner_margin(Margin::symmetric(8.0, 5.0))
+fn is_light() -> bool {
+    LIGHT.load(Ordering::Relaxed)
 }
 
-pub fn nav(ui: &mut egui::Ui, glyph: &str, label: &str, selected: bool) -> egui::Response {
-    ui.selectable_label(selected, format!("{glyph}  {label}"))
+fn rail_fill() -> Color32 {
+    if is_light() { Color32::from_rgb(240, 240, 240) } else { Color32::from_rgb(43, 43, 43) }
+}
+
+pub fn hover_fill() -> Color32 {
+    if is_light() { Color32::from_rgb(225, 225, 225) } else { Color32::from_rgb(58, 58, 58) }
+}
+
+pub fn border() -> Color32 {
+    if is_light() { Color32::from_gray(210) } else { Color32::from_gray(70) }
+}
+
+/// Error text that stays readable on both backgrounds.
+pub fn danger() -> Color32 {
+    if is_light() { Color32::from_rgb(232, 17, 35) } else { Color32::from_rgb(255, 120, 130) }
+}
+
+pub fn warn_fill() -> Color32 {
+    if is_light() { Color32::from_rgb(255, 244, 206) } else { Color32::from_rgb(88, 68, 0) }
+}
+
+pub fn bar_frame() -> egui::Frame {
+    egui::Frame::none().fill(rail_fill()).inner_margin(Margin::symmetric(8.0, 5.0))
+}
+
+pub fn rail_frame() -> egui::Frame {
+    egui::Frame::none().fill(rail_fill())
+}
+
+/// Roomy margins of a Windows 10 page.
+pub fn page_frame(ctx: &egui::Context) -> egui::Frame {
+    egui::Frame::central_panel(&ctx.style()).inner_margin(Margin::symmetric(24.0, 16.0))
+}
+
+pub fn accent_button(text: &str) -> egui::Button<'static> {
+    egui::Button::new(egui::RichText::new(text).color(Color32::WHITE)).fill(ACCENT)
+}
+
+/// One row of a Windows 10 navigation pane. In a compact pane only the glyph is visible.
+pub fn nav_item(ui: &mut egui::Ui, glyph: &str, label: &str, selected: bool, expanded: bool) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 44.0), egui::Sense::click());
+    let painter = ui.painter_at(rect);
+    if response.hovered() {
+        painter.rect_filled(rect, 0.0, hover_fill());
+    }
+    if selected {
+        let bar = egui::Rect::from_min_size(rect.min + Vec2::new(0.0, 8.0), Vec2::new(3.0, rect.height() - 16.0));
+        painter.rect_filled(bar, 0.0, ACCENT);
+    }
+    let color = ui.visuals().strong_text_color();
+    let y = rect.center().y;
+    painter.text(Pos2::new(rect.left() + 24.0, y), egui::Align2::CENTER_CENTER, glyph, egui::FontId::proportional(16.0), color);
+    if expanded {
+        painter.text(Pos2::new(rect.left() + 48.0, y), egui::Align2::LEFT_CENTER, label, egui::FontId::proportional(14.0), color);
+        response
+    } else if label.is_empty() {
+        response
+    } else {
+        response.on_hover_text(label)
+    }
+}
+
+/// Windows 10 toggle switch with a label that can be clicked too.
+pub fn toggle(ui: &mut egui::Ui, on: &mut bool, label: impl Into<egui::WidgetText>) -> egui::Response {
+    ui.horizontal(|ui| {
+        let (rect, switch) = ui.allocate_exact_size(Vec2::new(44.0, 20.0), egui::Sense::click());
+        let text = ui.add(egui::Label::new(label).sense(egui::Sense::click()).selectable(false));
+        let mut response = switch | text;
+        if response.clicked() {
+            *on = !*on;
+            response.mark_changed();
+        }
+        let how = ui.ctx().animate_bool(response.id, *on);
+        let outline = ui.visuals().strong_text_color();
+        let (fill, line, knob) = if *on { (ACCENT, ACCENT, Color32::WHITE) } else { (Color32::TRANSPARENT, outline, outline) };
+        let body = rect.shrink(1.0);
+        ui.painter().rect(body, body.height() / 2.0, fill, Stroke::new(2.0_f32, line));
+        let x = egui::lerp((body.left() + 9.0)..=(body.right() - 9.0), how);
+        ui.painter().circle_filled(Pos2::new(x, body.center().y), 5.0, knob);
+        response
+    })
+    .inner
 }
 
 pub fn paint_cursor(p: &egui::Painter, at: Pos2) {

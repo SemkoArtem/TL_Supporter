@@ -110,7 +110,6 @@ fn run_app(identity: Identity) -> Result<()> {
             viewport: egui::ViewportBuilder::default()
                 .with_title(agent_ui::CONSOLE_TITLE)
                 .with_inner_size([980.0, 560.0])
-                .with_maximized(true)
                 .with_min_inner_size([360.0, 120.0])
                 .with_icon(egui::IconData { rgba: agent_ui::icon_rgba(), width: 32, height: 32 }),
             renderer: eframe::Renderer::Glow,

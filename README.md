@@ -30,6 +30,7 @@ The program is free of charge, a free license is planned for later.
 - Autostart as a Windows service, the employee sees only a tray icon.
 - The window's close button hides the program to the tray. It closes completely only from the tray menu or settings, with the team admin password.
 - A lead's PC can switch to employee mode and back with the team admin password.
+- Dark Windows 10 style interface with a navigation pane. A light theme is available in the settings.
 - Updates: a lead's PC downloads a signed version from GitHub and distributes it over the local network.
 
 ### How it works
@@ -124,6 +125,7 @@ The "client hears" mode needs a signed virtual microphone driver. Its button in 
 - Автозапуск як служба Windows, у працівника лише значок у треї.
 - Хрестик вікна ховає програму в трей. Повністю вона закривається лише через меню значка в треї або налаштування, з адмінським паролем команди.
 - ПК керівника можна перевести в режим працівника і повернути назад з адмінським паролем команди.
+- Темний інтерфейс у стилі Windows 10 з панеллю навігації. Світла тема вмикається в налаштуваннях.
 - Оновлення: ПК керівника завантажує підписану версію з GitHub і роздає її в локальній мережі.
 
 ### Як це влаштовано
