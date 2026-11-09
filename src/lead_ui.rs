@@ -458,6 +458,11 @@ impl LeadApp {
         let hold = ui.add(egui::Button::new(format!("{} Утримуй", icon::MIC)).sense(Sense::click_and_drag()));
         MIC_BUTTON.store(hold.is_pointer_button_down_on(), Ordering::Relaxed);
         ui.add(egui::ProgressBar::new(crate::audio::mic_level().min(1.0)).desired_width(70.0).rounding(0.0));
+        if crate::audio::mic_failed() {
+            ui.colored_label(theme::danger(), "Мікрофон не відкрився").on_hover_text("Перевір пристрій у Налаштування → Звук");
+        } else if latched && now_ms() - crate::audio::mic_last_sound() > 3000 {
+            ui.colored_label(Color32::from_rgb(202, 130, 16), "Немає сигналу").on_hover_text("Мікрофон вимкнений у Windows або вибрано не той пристрій. Налаштування → Звук");
+        }
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(120));
         if open {
             ui.colored_label(theme::danger(), RichText::new("● В ефірі").strong());
@@ -528,9 +533,16 @@ impl LeadApp {
                 ui.horizontal(|ui| {
                     let name = self.node.member_name(&h.target);
                     let reason = if h.reason.is_empty() { String::new() } else { format!(" — {}", h.reason) };
-                    ui.strong(format!("{} {name}: потрібна допомога{reason}", icon::HELP));
+                    let missed = h.is_missed(now_ms());
+                    if missed {
+                        ui.colored_label(theme::danger(), icon::MISSED).on_hover_text("Ніхто не взяв цей запит");
+                        ui.strong(format!("{name}: пропущений запит{reason}"));
+                        ui.weak(format_ts(h.ts));
+                    } else {
+                        ui.strong(format!("{} {name}: потрібна допомога{reason}", icon::HELP));
+                    }
                     if h.taken_by.is_empty() {
-                        if ui.button("Взяти").clicked() {
+                        if ui.button(if missed { "Підключитись" } else { "Взяти" }).clicked() {
                             self.node.lead_take_help(&h.target, h.id);
                             self.open_session(&h.target, Some(Mode { listen: true, screen: ScreenLevel::Full, monitor: 0, quality: 0 }));
                         }
@@ -748,6 +760,9 @@ impl LeadApp {
                 })
                 .inner;
             r.context_menu(|ui| self.member_menu(ui, id, &name));
+            if self.node.lead.lock().help.iter().any(|h| h.target == id && h.is_missed(now_ms())) {
+                ui.colored_label(theme::danger(), icon::MISSED).on_hover_text("Пропущений запит допомоги");
+            }
             if self.node.state.read().lead.muted_help.iter().any(|m| m == id) {
                 ui.weak(icon::QUIET).on_hover_text("Запити допомоги з цього ПК вимкнено");
             }
@@ -920,6 +935,19 @@ impl LeadApp {
                 }
                 ui.separator();
                 if mode.listen {
+                    let s = self.node.state.read().lead.clone();
+                    let (mut agent, mut system) = (s.mix_agent * 100.0, s.mix_system * 100.0);
+                    ui.spacing_mut().slider_width = 80.0;
+                    ui.label("Працівник");
+                    let a = ui.add(egui::Slider::new(&mut agent, 0.0..=150.0).integer().suffix("%")).changed();
+                    ui.label("Система");
+                    let b = ui.add(egui::Slider::new(&mut system, 0.0..=150.0).integer().suffix("%")).changed();
+                    if a || b {
+                        self.save_lead(|l| {
+                            l.mix_agent = agent / 100.0;
+                            l.mix_system = system / 100.0;
+                        });
+                    }
                     if now_ms() - last_audio < 1500 {
                         ui.colored_label(Color32::from_rgb(108, 203, 95), "● Звук іде");
                     } else {

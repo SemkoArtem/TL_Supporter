@@ -278,6 +278,7 @@ struct Settings {
     id: String,
     key: theme::KeyView,
     confirm_reset: bool,
+    voice: (f32, bool),
     password: String,
     unlocked: bool,
     error: String,
@@ -315,7 +316,20 @@ impl eframe::App for Settings {
                 ui.label(crate::util::APP_VERSION);
                 ui.end_row();
             });
-            ui.add_space(14.0);
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                ui.label("Голос керівника");
+                let (mut volume, mut muted) = self.voice;
+                let mut percent = volume * 100.0;
+                let moved = ui.add_enabled(!muted, egui::Slider::new(&mut percent, 0.0..=100.0).integer().suffix("%")).changed();
+                volume = percent / 100.0;
+                let flipped = ui.checkbox(&mut muted, "Вимкнути").changed();
+                if moved || flipped {
+                    self.voice = (volume, muted);
+                    crate::audio::save_voice_cfg(volume, muted);
+                }
+            });
+            ui.add_space(10.0);
             ui.separator();
             if !self.unlocked {
                 ui.label("Для зміни налаштувань потрібен адмінський пароль:");
@@ -432,10 +446,10 @@ pub fn run_exit_prompt() {
 pub fn run_settings(identity: Identity) {
     let _ = eframe::run_native(
         "TL Supporter",
-        options(SETTINGS_TITLE, 460.0, 420.0),
+        options(SETTINGS_TITLE, 460.0, 460.0),
         Box::new(move |cc| {
             theme::apply(&cc.egui_ctx, model::load_state().lead.light_theme);
-            Ok(Box::new(Settings { id: identity.id, key: Default::default(), confirm_reset: false, password: String::new(), unlocked: false, error: String::new(), message: String::new() }))
+            Ok(Box::new(Settings { id: identity.id, key: Default::default(), confirm_reset: false, voice: crate::audio::load_voice_cfg(), password: String::new(), unlocked: false, error: String::new(), message: String::new() }))
         }),
     );
 }

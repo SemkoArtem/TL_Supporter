@@ -84,6 +84,15 @@ pub struct HelpItem {
     pub taken_by: String,
 }
 
+/// A request nobody took for this long counts as missed.
+pub const HELP_MISSED_MS: i64 = 60_000;
+
+impl HelpItem {
+    pub fn is_missed(&self, now: i64) -> bool {
+        self.taken_by.is_empty() && now - self.ts > HELP_MISSED_MS
+    }
+}
+
 #[derive(Default)]
 pub struct LeadInner {
     pub targets: HashMap<String, TargetView>,
@@ -108,6 +117,7 @@ struct VoiceRun {
 pub static MIC_OPEN: AtomicBool = AtomicBool::new(false);
 pub static MIC_LATCHED: AtomicBool = AtomicBool::new(false);
 pub static MIC_BUTTON: AtomicBool = AtomicBool::new(false);
+static VOICE_SENT_LOGGED: AtomicBool = AtomicBool::new(false);
 
 fn decode_jpeg(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
     use zune_jpeg::zune_core::colorspace::ColorSpace;
@@ -196,8 +206,8 @@ impl Node {
             }
             Msg::Clipboard(text) => {
                 let active = l.active.as_deref() == Some(&peer.id);
-                let full = l.targets.get(&peer.id).map(|t| t.mode.screen == ScreenLevel::Full).unwrap_or(false);
-                if active && full {
+                let controlling = l.targets.get(&peer.id).map(|t| t.control_holder == self.identity.id).unwrap_or(false);
+                if active && controlling {
                     l.clip_applied = Some(text.clone());
                     sysutil::clipboard_set(&text);
                 }
@@ -213,6 +223,14 @@ impl Node {
     }
 
     pub fn lead_on_audio(self: &Arc<Self>, peer: &Arc<Peer>, source: u8, sender: u32, seq: u16, opus: &[u8]) {
+        let gain = {
+            let st = self.state.read();
+            match source {
+                proto::SRC_AGENT_MIC => st.lead.mix_agent,
+                proto::SRC_AGENT_SYSTEM => st.lead.mix_system,
+                _ => 1.0,
+            }
+        };
         let mut l = self.lead.lock();
         if l.console_locked {
             return;
@@ -228,7 +246,7 @@ impl Node {
         }
         let key = (secure::short_id(&peer.id) as u64) << 32 | (source as u64) << 24 | (sender as u64 & 0xFF_FFFF);
         if l.audio_logged & (1 << source.min(7)) == 0 { l.audio_logged |= 1 << source.min(7); crate::logi!("first audio packet source={source}"); }
-        l.player.as_ref().unwrap().push(key, 0.0, opus, seq);
+        l.player.as_ref().unwrap().push(key, 0.0, gain, opus, seq);
     }
 
     pub async fn lead_read_screen(self: Arc<Self>, peer: Arc<Peer>, mut s: quinn::RecvStream, kind: u8) -> Result<()> {
@@ -510,6 +528,9 @@ impl Node {
                         if !MIC_OPEN.load(Ordering::Relaxed) {
                             return;
                         }
+                        if !VOICE_SENT_LOGGED.swap(true, Ordering::Relaxed) {
+                            crate::logi!("voice: first packet sent to the employee");
+                        }
                         let n = seq.fetch_add(1, Ordering::Relaxed);
                         let packet = proto::audio_packet(proto::SRC_LEAD_VOICE, me, n, opus);
                         if let Some(c) = t.lock().as_ref() {
@@ -562,7 +583,8 @@ impl Node {
                 return;
             }
             let Some(active) = l.active.clone() else { return };
-            if l.targets.get(&active).map(|t| t.mode.screen != ScreenLevel::Full).unwrap_or(true) {
+            // Copied text goes to the employee only while this lead controls the PC.
+            if l.targets.get(&active).map(|t| t.control_holder != self.identity.id).unwrap_or(true) {
                 return;
             }
             active

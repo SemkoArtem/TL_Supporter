@@ -33,6 +33,7 @@ pub mod icon {
     pub const MINI: &str = "\u{E73F}";
     pub const PEOPLE: &str = "\u{E716}";
     pub const MORE: &str = "\u{E712}";
+    pub const MISSED: &str = "\u{E7BA}";
     pub const QUIET: &str = "\u{E708}";
     pub const MENU: &str = "\u{E700}";
     pub const BRUSH: &str = "\u{E771}";

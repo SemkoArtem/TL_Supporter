@@ -23,7 +23,7 @@ The program is free of charge, a free license is planned for later.
 - Several leads at once, with the author's name next to each drawing.
 - On-screen drawing: two markers, rectangle, arrow with adjustable size. Frames and arrows appear when the button is released, a right click cancels. The laser is a live pointer that leaves no drawing, and clicks show as short rings.
 - Text hints with Accept, Reject and Ignore, an unread badge and a shared history kept only while the program runs. Sets of ready phrases, a "Need help" button with an optional reason, Do not disturb and muting of a single PC.
-- Mouse and keyboard control that the lead turns on and off at will. The clipboard is shared only on a full connection.
+- Mouse and keyboard control that the lead turns on and off at will. Text in the clipboard is shared only while the lead controls the PC. The lead has a mixer for the employee's microphone and the computer sound, the employee can set the volume of the lead's voice or mute it.
 - Full access on the lock screen, the sign-in screen and administrator windows, as a separate right for each lead.
 - Lead rights, an action journal, console lock and auto-lock, an admin password on the employee's PC.
 - Adding a PC with a one-time code, presets for quick installation, settings backup.
@@ -182,7 +182,7 @@ The "client hears" mode needs a signed virtual microphone driver. Its button in 
 - Кілька керівників одночасно, біля кожного малюнка видно ім'я автора.
 - Малюнки поверх екрана: два маркери, рамка, стрілка з налаштуванням розміру. Рамка і стрілка з'являються після відпускання кнопки, правий клік скасовує. Лазер це живий вказівник без малюнка, а кліки видно як короткі кільця.
 - Текстові підказки з кнопками «Прийняв», «Відхилив», «Ігнор», значком непрочитаного і спільною історією, що зберігається лише поки працює програма. Набори готових фраз, кнопка «Потрібна допомога» з необов'язковою причиною, режим «Не турбувати» і вимкнення запитів від окремого ПК.
-- Керування мишею і клавіатурою, яке керівник вмикає і вимикає сам. Буфер обміну спільний лише при повному підключенні.
+- Керування мишею і клавіатурою, яке керівник вмикає і вимикає сам. Текст у буфері обміну спільний лише під час керування. У керівника є мікшер мікрофона працівника і звуку системи, працівник може змінити гучність голосу керівника або вимкнути його.
 - Повний доступ на екрані блокування, екрані входу і у вікнах адміністратора, окреме право для кожного керівника.
 - Права керівників, журнал дій, блокування консолі й автоблокування, адмінський пароль на ПК працівника.
 - Додавання ПК за одноразовим кодом, пресети для швидкого встановлення, резервна копія налаштувань.

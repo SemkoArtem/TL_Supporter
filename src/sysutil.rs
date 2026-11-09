@@ -116,7 +116,20 @@ pub fn clipboard_get() -> Option<String> {
 
 pub fn clipboard_set(text: &str) {
     unsafe {
-        if OpenClipboard(None).is_err() {
+        // Windows refuses to store data when the clipboard has no owner window.
+        let owner = CreateWindowExW(WINDOW_EX_STYLE(0), windows::core::w!("STATIC"), PCWSTR::null(), WINDOW_STYLE(0), 0, 0, 0, 0, HWND_MESSAGE, None, None, None).unwrap_or_default();
+        // Another program may be holding the clipboard for a moment.
+        let mut opened = false;
+        for _ in 0..10 {
+            if OpenClipboard(owner).is_ok() {
+                opened = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        if !opened {
+            crate::logi!("clipboard is busy, text not stored");
+            let _ = DestroyWindow(owner);
             return;
         }
         let _ = EmptyClipboard();
@@ -126,10 +139,29 @@ pub fn clipboard_set(text: &str) {
             if !p.is_null() {
                 std::ptr::copy_nonoverlapping(w.as_ptr(), p, w.len());
                 let _ = GlobalUnlock(global);
-                let _ = SetClipboardData(CF_UNICODETEXT.0 as u32, HANDLE(global.0));
+                if let Err(e) = SetClipboardData(CF_UNICODETEXT.0 as u32, HANDLE(global.0)) {
+                    crate::logi!("clipboard write failed: {e}");
+                }
             }
         }
         let _ = CloseClipboard();
+        let _ = DestroyWindow(owner);
+    }
+}
+
+#[cfg(test)]
+mod clipboard_tests {
+    /// Touches the real clipboard, so it runs only on request and puts the old text back.
+    #[test]
+    #[ignore]
+    fn text_written_can_be_read_back() {
+        let saved = super::clipboard_get();
+        super::clipboard_set("TL Supporter перевірка буфера");
+        let read = super::clipboard_get();
+        if let Some(old) = saved {
+            super::clipboard_set(&old);
+        }
+        assert_eq!(read.as_deref(), Some("TL Supporter перевірка буфера"));
     }
 }
 

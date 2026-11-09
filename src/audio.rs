@@ -6,7 +6,7 @@ use audiopus::coder::{Decoder, Encoder};
 use audiopus::{Application, Channels, SampleRate};
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 use std::sync::Arc;
 use windows::core::{implement, Interface, IUnknown, HRESULT, PCWSTR};
 use windows::Win32::Foundation::*;
@@ -54,6 +54,45 @@ fn pcm_format(channels: u16) -> WAVEFORMATEX {
 static DEVICES: Mutex<(String, String)> = parking_lot::const_mutex((String::new(), String::new()));
 static MIC_LEVEL: AtomicU32 = AtomicU32::new(0);
 static SEND_LOGGED: AtomicBool = AtomicBool::new(false);
+static MIC_FAILED: AtomicBool = AtomicBool::new(false);
+static MIC_LAST_SOUND: AtomicI64 = AtomicI64::new(0);
+/// Volume of the lead's voice on the employee's PC, as the bits of an f32.
+static VOICE_GAIN: AtomicU32 = AtomicU32::new(0x3F80_0000);
+
+const VOICE_CFG: &str = "voice.cfg";
+
+/// Volume from 0 to 1 and whether the employee has muted the lead's voice.
+pub fn load_voice_cfg() -> (f32, bool) {
+    let text = std::fs::read_to_string(crate::util::data_dir().join(VOICE_CFG)).unwrap_or_default();
+    let mut parts = text.split_whitespace();
+    let volume = parts.next().and_then(|v| v.parse::<f32>().ok()).unwrap_or(1.0).clamp(0.0, 1.0);
+    (volume, parts.next() == Some("1"))
+}
+
+pub fn save_voice_cfg(volume: f32, muted: bool) {
+    let _ = std::fs::write(crate::util::data_dir().join(VOICE_CFG), format!("{volume:.2} {}", u8::from(muted)));
+    apply_voice_cfg();
+}
+
+/// Picks up a change made in the separate settings window.
+pub fn apply_voice_cfg() {
+    let (volume, muted) = load_voice_cfg();
+    VOICE_GAIN.store((if muted { 0.0 } else { volume }).to_bits(), Ordering::Relaxed);
+}
+
+pub fn voice_gain() -> f32 {
+    f32::from_bits(VOICE_GAIN.load(Ordering::Relaxed))
+}
+
+/// The microphone could not be opened at all.
+pub fn mic_failed() -> bool {
+    MIC_FAILED.load(Ordering::Relaxed)
+}
+
+/// When the microphone last picked up anything, in milliseconds of `now_ms`.
+pub fn mic_last_sound() -> i64 {
+    MIC_LAST_SOUND.load(Ordering::Relaxed)
+}
 
 pub fn set_devices(mic: &str, speaker: &str) {
     *DEVICES.lock() = (mic.to_string(), speaker.to_string());
@@ -237,6 +276,9 @@ pub fn run_capture(
         while !stop.load(Ordering::Relaxed) {
             if let Err(e) = capture_once(kind, &stop, &mut on_packet) {
                 crate::logi!("audio capture {kind:?} failed: {e}");
+                if kind == CaptureKind::Microphone {
+                    MIC_FAILED.store(true, Ordering::Relaxed);
+                }
                 std::thread::sleep(std::time::Duration::from_millis(1500));
             }
         }
@@ -256,6 +298,9 @@ fn capture_once(kind: CaptureKind, stop: &AtomicBool, on_packet: &mut impl FnMut
             }
         },
     };
+    if kind == CaptureKind::Microphone {
+        MIC_FAILED.store(false, Ordering::Relaxed);
+    }
     unsafe {
         let event = CreateEventW(None, false, false, None)?;
         if event_ok {
@@ -302,6 +347,9 @@ fn capture_once(kind: CaptureKind, stop: &AtomicBool, on_packet: &mut impl FnMut
                     let peak = frame.iter().map(|s| s.unsigned_abs() as u32).max().unwrap_or(0);
                     if kind == CaptureKind::Microphone {
                         MIC_LEVEL.store(peak, Ordering::Relaxed);
+                        if peak > 30 {
+                            MIC_LAST_SOUND.store(crate::util::now_ms(), Ordering::Relaxed);
+                        }
                     }
                     if peak > 30 && !heard {
                         heard = true;
@@ -327,6 +375,7 @@ struct Source {
     queue: VecDeque<i16>,
     pan_left: f32,
     pan_right: f32,
+    gain: f32,
     started: bool,
     last_seq: Option<u16>,
 }
@@ -383,8 +432,8 @@ fn mix_into(sources: &mut HashMap<u64, Source>, out: &mut [i16]) {
                 src.started = false;
                 break;
             };
-            mixed[i * 2] += s as f32 * src.pan_left;
-            mixed[i * 2 + 1] += s as f32 * src.pan_right;
+            mixed[i * 2] += s as f32 * src.pan_left * src.gain;
+            mixed[i * 2 + 1] += s as f32 * src.pan_right * src.gain;
         }
     }
     for (o, m) in out.iter_mut().zip(mixed) {
@@ -416,18 +465,19 @@ impl Player {
     }
 
     /// `pan` is -1 for left ear only, 0 for both, 1 for right ear only.
-    pub fn push(&self, key: u64, pan: f32, packet: &[u8], seq: u16) {
+    pub fn push(&self, key: u64, pan: f32, gain: f32, packet: &[u8], seq: u16) {
         let mut map = self.sources.lock();
         if !map.contains_key(&key) {
             let Ok(decoder) = Decoder::new(SampleRate::Hz48000, Channels::Mono) else { return };
             map.insert(
                 key,
-                Source { decoder, queue: VecDeque::new(), pan_left: 1.0, pan_right: 1.0, started: false, last_seq: None },
+                Source { decoder, queue: VecDeque::new(), pan_left: 1.0, pan_right: 1.0, gain: 1.0, started: false, last_seq: None },
             );
         }
         let src = map.get_mut(&key).unwrap();
         src.pan_left = if pan > 0.0 { 0.0 } else { 1.0 };
         src.pan_right = if pan < 0.0 { 0.0 } else { 1.0 };
+        src.gain = gain;
         apply_packet(src, packet, seq);
     }
 
@@ -482,9 +532,26 @@ mod tests {
             queue: VecDeque::new(),
             pan_left: 1.0,
             pan_right: 1.0,
+            gain: 1.0,
             started: false,
             last_seq: None,
         }
+    }
+
+    #[test]
+    fn two_sources_play_together_with_their_own_volume() {
+        let mut map = HashMap::new();
+        let mut mic = source();
+        mic.queue.extend(std::iter::repeat(1000).take(START_SAMPLES));
+        let mut system = source();
+        system.gain = 0.5;
+        system.queue.extend(std::iter::repeat(400).take(START_SAMPLES));
+        map.insert(1u64, mic);
+        map.insert(2u64, system);
+        let mut out = vec![0i16; 8];
+        mix_into(&mut map, &mut out);
+        assert_eq!(out[0], 1200, "both sources are heard at once");
+        assert_eq!(out[1], 1200);
     }
 
     #[test]

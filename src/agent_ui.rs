@@ -517,6 +517,9 @@ struct Ui {
     pointers: Vec<PointerMark>,
     taps: Vec<TapMark>,
     panel_rect: (i32, i32, i32, i32),
+    /// Vertical position and height of each hint card inside the panel.
+    toast_area: Vec<(f32, f32)>,
+    last_refresh: Instant,
     lbutton_was: bool,
     activity: Vec<LeadActivity>,
     policy: Policy,
@@ -875,11 +878,13 @@ impl Ui {
             self.actions.push((Rect::from_xywh(115.0, y + 36.0, 90.0, 26.0).unwrap(), Action::Consent(i, false)));
             y += 72.0;
         }
+        self.toast_area.clear();
         for (i, offset) in &toasts {
             let (i, x0) = (*i, *offset);
             let hint = &self.hints[i];
             let lines = &hint_lines[i];
             let box_h = 62.0 + lines.len() as f32 * 19.0;
+            self.toast_area.push((y, box_h));
             let bg = Rect::from_xywh(x0, y, PANEL_W as f32, box_h).unwrap();
             fill(&mut pix, &mut paint, bg, [31, 31, 31, 245]);
             let c = hint.color;
@@ -893,7 +898,7 @@ impl Ui {
         }
         if self.history_open {
             fill(&mut pix, &mut paint, Rect::from_xywh(0.0, y, PANEL_W as f32, 30.0).unwrap(), [51, 51, 51, 250]);
-            font.draw(&mut pix, "Підказки", 12.0, y + 20.0, 13.0, [242, 242, 242]);
+            font.draw(&mut pix, "Історія", 12.0, y + 20.0, 13.0, [242, 242, 242]);
             if self.hints.len() > HISTORY_ROWS {
                 font.draw(&mut pix, "коліщатком вгору: старіші", 118.0, y + 20.0, 11.0, [170, 170, 170]);
             }
@@ -969,7 +974,7 @@ impl Ui {
         if !self.hints.is_empty() {
             let unread = self.hints.iter().filter(|h| h.state == 0).count();
             fill(&mut pix, &mut paint, Rect::from_xywh(0.0, y, PANEL_W as f32, 28.0).unwrap(), [51, 51, 51, 245]);
-            font.draw(&mut pix, "Підказки", 12.0, y + 19.0, 13.0, [242, 242, 242]);
+            font.draw(&mut pix, "Історія", 12.0, y + 19.0, 13.0, [242, 242, 242]);
             if unread > 0 {
                 paint.set_color_rgba8(232, 17, 35, 255);
                 if let Some(c) = PathBuilder::from_circle(PANEL_W as f32 - 20.0, y + 14.0, 10.0) {
@@ -1073,6 +1078,8 @@ impl Ui {
         }
         let (x, y, w, h) = self.panel_rect;
         let over = self.panel_visible && p.x >= x && p.x < x + w && p.y >= y && p.y < y + h;
+        // Only a cursor on the card itself keeps it, a mouse parked nearby must not.
+        let over_card = over && self.toast_area.iter().any(|(top, height)| (p.y - y) as f32 >= *top && ((p.y - y) as f32) < top + height);
         let hold = self.hint_hold();
         let mut changed = false;
         for hint in self.hints.iter_mut() {
@@ -1081,7 +1088,7 @@ impl Ui {
             if e <= hold {
                 continue;
             }
-            if over {
+            if over_card {
                 hint.toast_from = Some(now - hold);
             } else if e >= hold + HINT_SLIDE {
                 hint.toast_from = None;
@@ -1089,11 +1096,17 @@ impl Ui {
             changed = true;
         }
         let down = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } < 0;
-        if down && !self.lbutton_was && !over && self.history_open {
+        if down && !self.lbutton_was && !over && (self.history_open || self.help_menu) {
             self.history_open = false;
+            self.help_menu = false;
             changed = true;
         }
         self.lbutton_was = down;
+        // Redraw now and then, a picture left from a locked Windows must not stay on screen.
+        if self.panel_visible && now.duration_since(self.last_refresh) >= Duration::from_secs(1) {
+            self.last_refresh = now;
+            changed = true;
+        }
         if changed {
             self.panel_dirty = true;
         }
@@ -1119,6 +1132,10 @@ impl Ui {
                 let _ = AppendMenuW(menu, MF_STRING, 2, w!("Потрібна допомога"));
             }
             let _ = AppendMenuW(menu, MF_STRING, 3, w!("Налаштування…"));
+            if !self.is_lead_pc {
+                let muted = crate::audio::load_voice_cfg().1;
+                let _ = AppendMenuW(menu, MF_STRING, 6, if muted { w!("Увімкнути звук керівника") } else { w!("Вимкнути звук керівника") });
+            }
             let _ = AppendMenuW(menu, MF_STRING, 5, w!("Перезапустити"));
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
             let _ = AppendMenuW(menu, MF_STRING, 4, w!("Закрити програму…"));
@@ -1134,6 +1151,10 @@ impl Ui {
                 2 => self.node.agent_request_help(String::new()),
                 3 => open_settings_process(),
                 4 => open_exit_prompt(),
+                6 => {
+                    let (volume, muted) = crate::audio::load_voice_cfg();
+                    crate::audio::save_voice_cfg(volume, !muted);
+                }
                 5 => {
                     let _ = Shell_NotifyIconW(NIM_DELETE, &self.tray_data);
                     crate::service::restart_program();
@@ -1181,6 +1202,7 @@ impl Ui {
             || !self.pointers.is_empty()
             || !self.taps.is_empty()
             || self.history_open
+            || self.help_menu
             || self.hints.iter().any(|h| h.toast_from.is_some())
     }
 
@@ -1384,6 +1406,8 @@ pub fn run(node: Arc<Node>, rx: Receiver<UiCmd>, handle: UiHandle, is_lead_pc: b
             pointers: Vec::new(),
             taps: Vec::new(),
             panel_rect: (0, 0, 0, 0),
+            toast_area: Vec::new(),
+            last_refresh: Instant::now(),
             lbutton_was: false,
             activity: Vec::new(),
             policy,
@@ -1397,6 +1421,8 @@ pub fn run(node: Arc<Node>, rx: Receiver<UiCmd>, handle: UiHandle, is_lead_pc: b
             timer_on: false,
         };
         ui.render_panel();
+        // A slow tick keeps the panel honest even when nothing else happens.
+        SetTimer(tray_hwnd, 2, 1000, None);
         let mut msg = MSG::default();
         loop {
             if !GetMessageW(&mut msg, None, 0, 0).as_bool() {

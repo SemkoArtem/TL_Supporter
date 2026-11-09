@@ -320,6 +320,9 @@ pub struct LeadSettings {
     pub rect_width: f32,
     pub arrow_width: f32,
     pub pointer_size: f32,
+    /// How loud this lead hears the employee's microphone and the computer sound.
+    pub mix_agent: f32,
+    pub mix_system: f32,
     /// Empty means the Windows default device.
     pub mic_device: String,
     pub speaker_device: String,
@@ -349,6 +352,8 @@ impl Default for LeadSettings {
             rect_width: 3.0,
             arrow_width: 4.0,
             pointer_size: 10.0,
+            mix_agent: 1.0,
+            mix_system: 1.0,
             mic_device: String::new(),
             speaker_device: String::new(),
             do_not_disturb: false,

@@ -332,8 +332,9 @@ impl Node {
                 }
             }
             Msg::Clipboard(text) => {
-                let full = self.agent.lock().links.get(&peer.id).map(|l| l.mode.screen == ScreenLevel::Full).unwrap_or(false);
-                if full {
+                // The clipboard is shared only with the lead who is controlling this PC.
+                let controlling = self.agent.lock().control.as_deref() == Some(peer.id.as_str());
+                if controlling {
                     self.agent.lock().clip_applied = Some(text.clone());
                     sysutil::clipboard_set(&text);
                 }
@@ -404,8 +405,12 @@ impl Node {
     }
 
     pub fn agent_on_voice(self: &Arc<Self>, peer: &Arc<Peer>, raw: &[u8], sender: u32, seq: u16, opus: &[u8]) {
-        let Some(rights) = self.rights_of(&peer.id) else { return };
+        let Some(rights) = self.rights_of(&peer.id) else {
+            crate::logi!("voice ignored: lead has no access to this PC");
+            return;
+        };
         if !rights.whisper {
+            crate::logi!("voice ignored: lead has no right to speak");
             return;
         }
         let relay: Vec<quinn::Connection> = {
@@ -422,7 +427,7 @@ impl Node {
                 a.player = Some(Player::new());
             }
             if !a.voice_logged { a.voice_logged = true; crate::logi!("first voice packet from lead"); }
-            a.player.as_ref().unwrap().push(sender as u64, 0.0, opus, seq);
+            a.player.as_ref().unwrap().push(sender as u64, 0.0, audio::voice_gain(), opus, seq);
             a.links.values().filter(|l| l.peer.id != peer.id && l.mode.listen).map(|l| l.peer.conn.clone()).collect()
         };
         // Other leads on this employee hear the hint too, so they do not talk over each other.
@@ -497,8 +502,7 @@ impl Node {
             let mut a = self.agent.lock();
             let changed = seq != a.clip_seq;
             a.clip_seq = seq;
-            let leads: Vec<Arc<Peer>> =
-                a.links.values().filter(|l| l.mode.screen == ScreenLevel::Full).map(|l| l.peer.clone()).collect();
+            let leads: Vec<Arc<Peer>> = a.control.as_ref().and_then(|c| a.links.get(c)).map(|l| l.peer.clone()).into_iter().collect();
             (changed, leads)
         };
         if !changed || full_leads.is_empty() {
@@ -559,6 +563,7 @@ impl Node {
                 self.poll_clipboard();
             }
             if n % 15 == 0 {
+                audio::apply_voice_cfg();
                 let test_locked = std::env::var("TLS_DATA_DIR").is_ok() && crate::util::data_dir().join("fake.lock").exists();
                 let locked = sysutil::is_desktop_locked() || test_locked;
                 let (changed, peers) = {
