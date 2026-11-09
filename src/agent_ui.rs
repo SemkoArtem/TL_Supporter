@@ -7,7 +7,7 @@ use crate::node::Node;
 use crate::proto::{DrawOp, LeadActivity, Tool};
 use crate::util::wide;
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -390,7 +390,25 @@ pub fn hide_console_window() {
 }
 
 pub fn console_visible() -> bool {
-    own_console_window().map(|h| unsafe { IsWindowVisible(h).as_bool() }).unwrap_or(false)
+    own_console_window().map(|h| unsafe { IsWindowVisible(h).as_bool() && !IsIconic(h).as_bool() }).unwrap_or(false)
+}
+
+/// A taskbar button is shown on purpose while a help request is waiting to be noticed.
+static ATTENTION: AtomicBool = AtomicBool::new(false);
+
+/// Was the console just minimized, so that it should move to the tray?
+pub fn console_wants_tray() -> bool {
+    let Some(h) = own_console_window() else { return false };
+    unsafe {
+        let visible = IsWindowVisible(h).as_bool();
+        if !IsIconic(h).as_bool() {
+            if visible {
+                ATTENTION.store(false, Ordering::SeqCst);
+            }
+            return false;
+        }
+        visible && !ATTENTION.load(Ordering::SeqCst)
+    }
 }
 
 /// Blink the console button on the taskbar without taking the lead away from what they do.
@@ -400,6 +418,7 @@ pub fn flash_console_window() {
         if let Ok(h) = FindWindowW(None, PCWSTR(title.as_ptr())) {
             // A console hidden in the tray has no taskbar button to blink, so give it one.
             if !IsWindowVisible(h).as_bool() {
+                ATTENTION.store(true, Ordering::SeqCst);
                 let _ = ShowWindow(h, SW_SHOWMINNOACTIVE);
             }
             let info = FLASHWINFO {

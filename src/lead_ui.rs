@@ -45,6 +45,8 @@ struct ScreenTex {
 static HIDDEN_WATCH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// The console should show its lock screen the next time it opens.
 static TRAY_LOCK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The next visible frame follows a pause in the tray.
+static BACK_FROM_TRAY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[derive(Default)]
 struct MemberDialog {
@@ -94,7 +96,6 @@ pub struct LeadApp {
     draft: SettingsDraft,
     locked: bool,
     unlock_input: String,
-    back_from_tray: bool,
     nav_open: bool,
     nav_peek: bool,
     opened_maximized: bool,
@@ -106,10 +107,51 @@ pub struct LeadApp {
     started: std::time::Instant,
 }
 
+/// Keep working in the tray. A hidden window gets no frames, so a helper thread watches
+/// the auto-lock rules until the console is shown again.
+fn send_to_tray(node: &Arc<Node>) {
+    MIC_LATCHED.store(false, Ordering::Relaxed);
+    MIC_BUTTON.store(false, Ordering::Relaxed);
+    node.lead_set_thumbs(false);
+    crate::agent_ui::hide_console_window();
+    BACK_FROM_TRAY.store(true, Ordering::SeqCst);
+    if HIDDEN_WATCH.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let node = node.clone();
+    std::thread::spawn(move || {
+        let mut last = std::time::SystemTime::now();
+        let mut was_locked = sysutil::is_desktop_locked();
+        while !crate::agent_ui::console_visible() {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            let now = std::time::SystemTime::now();
+            let gap = now.duration_since(last).map(|d| d.as_secs()).unwrap_or(0);
+            last = now;
+            let s = node.state.read().lead.clone();
+            let locked = sysutil::is_desktop_locked();
+            let edge = locked && !was_locked;
+            was_locked = locked;
+            if (s.lock_with_windows && edge) || (s.lock_on_sleep && gap > 30) || (s.lock_enabled && sysutil::idle_ms() > s.lock_idle_min.max(1) as u64 * 60_000) {
+                TRAY_LOCK.store(true, Ordering::SeqCst);
+                node.lead_lock_console();
+            }
+        }
+        HIDDEN_WATCH.store(false, Ordering::SeqCst);
+    });
+}
+
 impl LeadApp {
     pub fn new(cc: &eframe::CreationContext<'_>, node: Arc<Node>) -> Self {
         theme::apply(&cc.egui_ctx, node.state.read().lead.light_theme);
         *node.repaint.lock() = Some(cc.egui_ctx.clone());
+        // A minimized window gets no frames either, so this cannot be checked in `update`.
+        let watcher = node.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            if crate::agent_ui::console_wants_tray() {
+                send_to_tray(&watcher);
+            }
+        });
         let (reasons, repo, personal) = {
             let st = node.state.read();
             (st.directory.policy.help_reasons.join("\n"), st.directory.policy.update_repo.clone(), st.lead.personal_phrases.join("\n"))
@@ -134,7 +176,6 @@ impl LeadApp {
             draft: SettingsDraft { reasons, repo, personal, ..Default::default() },
             locked: false,
             unlock_input: String::new(),
-            back_from_tray: false,
             nav_open: true,
             nav_peek: false,
             opened_maximized: false,
@@ -170,37 +211,8 @@ impl LeadApp {
         self.node.audit_log("—", "Консоль заблоковано");
     }
 
-    /// Keep working in the tray. A hidden window gets no frames, so a helper thread watches
-    /// the auto-lock rules until the console is shown again.
     fn hide_to_tray(&mut self) {
-        MIC_LATCHED.store(false, Ordering::Relaxed);
-        MIC_BUTTON.store(false, Ordering::Relaxed);
-        self.node.lead_set_thumbs(false);
-        crate::agent_ui::hide_console_window();
-        self.back_from_tray = true;
-        if HIDDEN_WATCH.swap(true, Ordering::SeqCst) {
-            return;
-        }
-        let node = self.node.clone();
-        std::thread::spawn(move || {
-            let mut last = std::time::SystemTime::now();
-            let mut was_locked = sysutil::is_desktop_locked();
-            while !crate::agent_ui::console_visible() {
-                std::thread::sleep(std::time::Duration::from_secs(1));
-                let now = std::time::SystemTime::now();
-                let gap = now.duration_since(last).map(|d| d.as_secs()).unwrap_or(0);
-                last = now;
-                let s = node.state.read().lead.clone();
-                let locked = sysutil::is_desktop_locked();
-                let edge = locked && !was_locked;
-                was_locked = locked;
-                if (s.lock_with_windows && edge) || (s.lock_on_sleep && gap > 30) || (s.lock_enabled && sysutil::idle_ms() > s.lock_idle_min.max(1) as u64 * 60_000) {
-                    TRAY_LOCK.store(true, Ordering::SeqCst);
-                    node.lead_lock_console();
-                }
-            }
-            HIDDEN_WATCH.store(false, Ordering::SeqCst);
-        });
+        send_to_tray(&self.node);
     }
 
     fn check_auto_lock(&mut self) {
@@ -210,9 +222,9 @@ impl LeadApp {
         let now = std::time::SystemTime::now();
         let mut gap = now.duration_since(self.last_tick).map(|d| d.as_secs()).unwrap_or(0);
         self.last_tick = now;
-        if self.back_from_tray && crate::agent_ui::console_visible() {
+        if BACK_FROM_TRAY.load(Ordering::SeqCst) && crate::agent_ui::console_visible() {
             // The pause came from hiding the window, not from the PC sleeping.
-            self.back_from_tray = false;
+            BACK_FROM_TRAY.store(false, Ordering::SeqCst);
             gap = 0;
             self.was_win_locked = sysutil::is_desktop_locked();
         }
@@ -1142,7 +1154,7 @@ impl LeadApp {
         });
         ui.add_space(12.0);
         ui.heading("Робота програми");
-        ui.weak("Хрестик ховає вікно в трей. Для повного виходу потрібен адмінський пароль команди, закрити можна і через правий клік на значку в треї. Програма запуститься знову при наступному вході в Windows.");
+        ui.weak("Хрестик і кнопка згортання ховають вікно в трей. Для повного виходу потрібен адмінський пароль команди, закрити можна і через правий клік на значку в треї. Програма запуститься знову при наступному вході в Windows.");
         ui.horizontal(|ui| {
             ui.add(egui::TextEdit::singleline(&mut self.draft.exit_pw).password(true).desired_width(220.0).hint_text("Адмінський пароль"));
             if ui.button("Вийти з програми").clicked() {

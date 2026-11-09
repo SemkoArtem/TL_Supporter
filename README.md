@@ -28,7 +28,7 @@ The program is free of charge, a free license is planned for later.
 - Lead rights, an action journal, console lock and auto-lock, an admin password on the employee's PC.
 - Adding a PC with a one-time code, presets for quick installation, settings backup.
 - Autostart as a Windows service, the employee sees only a tray icon.
-- The window's close button hides the program to the tray. It closes completely only from the tray menu or settings, with the team admin password.
+- The close and minimize buttons hide the program to the tray, with no taskbar button. It closes completely only from the tray menu or settings, with the team admin password.
 - A lead's PC can switch to employee mode and back with the team admin password.
 - Dark Windows 10 style interface with a navigation pane. A light theme is available in the settings.
 - Updates: a lead's PC downloads a signed version from GitHub and distributes it over the local network.
@@ -45,22 +45,83 @@ Stack: Rust, egui, quinn, Opus, DXGI Desktop Duplication, WASAPI.
 
 Tested with two copies on one PC: discovery by key, join code, screen, thumbnails, drawings, text hints,
 control, voice, computer sound, switching to the secure channel on a simulated lock.
+Tested on one real PC: service installation, SYSTEM process, firewall rule, restart after the program is killed.
 
-Not yet tested on real PCs: service installation, autostart, firewall, operation between two computers,
-real lock and sign-in screens and administrator windows, drawing and control over full-screen mstsc, publishing an update.
+Not yet tested: operation between two computers, real lock and sign-in screens and administrator windows,
+drawing and control over full-screen mstsc, publishing an update.
 
 ### Installation
 
-1. Run `TLSupporter.exe` on the lead's PC, choose "Створити нову команду" (create a new team) and confirm the administrator prompt.
-2. On the lead's PC: Налаштування (Settings) → Додати ПК (Add PC) → Створити код (Create code).
-3. On the employee's PC, run the same file and choose "Приєднатись за кодом" (join with a code).
-4. On the lead's PC, press "Підтвердити" (Confirm) next to the new PC.
+You need a Windows account with administrator rights. Run every command below in PowerShell opened as administrator
+(Start → type `PowerShell` → Run as administrator).
 
-Silent installation with a preset (as administrator):
+**1. Add the program to the Windows Defender exclusions.** Do this on every PC before the file gets there.
+The program controls a computer remotely and has no publisher signature yet, so Defender may quarantine it as a trojan.
 
-    TLSupporter.exe --install --preset agent.tlpreset --preset-password PASSWORD
+    New-Item -ItemType Directory -Force "C:\TLSupporterSetup" | Out-Null
+    Add-MpPreference -ExclusionPath "C:\TLSupporterSetup"
+    Add-MpPreference -ExclusionPath "C:\Program Files\TLSupporter"
 
-Uninstall (as administrator): `TLSupporter.exe --uninstall`
+Check the result. Both folders must be listed:
+
+    Get-MpPreference | Select-Object -ExpandProperty ExclusionPath
+
+If the PC uses another antivirus, add the same two folders in its settings.
+
+**2. Put the file into that folder.** Download [TLSupporter.exe](https://github.com/SemkoArtem/TL_Supporter/raw/main/download/TLSupporter.exe)
+while signed in to a GitHub account that has access to this repository, or copy it from a USB drive.
+Save it as `C:\TLSupporterSetup\TLSupporter.exe`, then allow it to run:
+
+    Unblock-File "C:\TLSupporterSetup\TLSupporter.exe"
+
+**3. Start it.** The program installs itself into `C:\Program Files\TLSupporter`, registers the service and opens the firewall for the local subnet.
+
+    Start-Process "C:\TLSupporterSetup\TLSupporter.exe"
+
+- First lead: choose "Створити нову команду" (create a new team) and set the team admin password. Keep this password, it is needed to close the program.
+- Every other PC: on a lead's PC open Налаштування (Settings) → Додати ПК (Add PC) → Створити код (Create code).
+  On the new PC choose "Приєднатись за кодом" (join with a code) and enter it. Then press "Підтвердити" (Confirm) next to the new PC on the lead's side.
+
+**4. Check it.** The status must be `Running`, and three `TLSupporter` processes must be running:
+
+    Get-Service TLSupporter
+    Get-Process TLSupporter
+
+#### Quick installation with a preset
+
+Create the file on a lead's PC in Налаштування (Settings) → Копія і пресет (Backup and preset) and copy it into `C:\TLSupporterSetup`. Do step 1 first, then:
+
+    Start-Process "C:\TLSupporterSetup\TLSupporter.exe" -ArgumentList '--install --preset "C:\TLSupporterSetup\agent.tlpreset" --preset-password PASSWORD' -Wait
+
+#### Installing a new version
+
+Replace the file in `C:\TLSupporterSetup`, then run the commands below. The team and settings are kept.
+
+    Unblock-File "C:\TLSupporterSetup\TLSupporter.exe"
+    Start-Process "C:\TLSupporterSetup\TLSupporter.exe" -ArgumentList "--uninstall" -Wait
+    Start-Process "C:\TLSupporterSetup\TLSupporter.exe" -ArgumentList "--install" -Wait
+
+#### Removing the program
+
+    Start-Process "C:\TLSupporterSetup\TLSupporter.exe" -ArgumentList "--uninstall" -Wait
+    Remove-MpPreference -ExclusionPath "C:\TLSupporterSetup"
+    Remove-MpPreference -ExclusionPath "C:\Program Files\TLSupporter"
+
+The team and settings stay in `C:\ProgramData\TLSupporter`. To erase them too:
+
+    Remove-Item -Recurse -Force "C:\ProgramData\TLSupporter"
+
+#### Closing and minimizing
+
+- The window's close and minimize buttons hide the program to the tray near the clock. The icon may be under the arrow there. The taskbar button goes away.
+- A left click on the icon opens the console.
+- A right click → "Закрити програму…" (close the program) asks for the team admin password. The program then stays closed until the next Windows sign-in.
+- Ending it in Task Manager does not help: the service starts it again within a few seconds.
+
+#### If something goes wrong
+
+- Defender blocked it: Windows Security → Protection history. Check that step 1 was done and install again.
+- The program log is `C:\ProgramData\TLSupporter\tlsupporter.log`.
 
 Network: UDP 47700–47703, the firewall rule is added for the local subnet only.
 
@@ -123,7 +184,7 @@ The "client hears" mode needs a signed virtual microphone driver. Its button in 
 - Права керівників, журнал дій, блокування консолі й автоблокування, адмінський пароль на ПК працівника.
 - Додавання ПК за одноразовим кодом, пресети для швидкого встановлення, резервна копія налаштувань.
 - Автозапуск як служба Windows, у працівника лише значок у треї.
-- Хрестик вікна ховає програму в трей. Повністю вона закривається лише через меню значка в треї або налаштування, з адмінським паролем команди.
+- Хрестик і кнопка згортання ховають програму в трей, без кнопки на панелі задач. Повністю вона закривається лише через меню значка в треї або налаштування, з адмінським паролем команди.
 - ПК керівника можна перевести в режим працівника і повернути назад з адмінським паролем команди.
 - Темний інтерфейс у стилі Windows 10 з панеллю навігації. Світла тема вмикається в налаштуваннях.
 - Оновлення: ПК керівника завантажує підписану версію з GitHub і роздає її в локальній мережі.
@@ -140,22 +201,83 @@ The "client hears" mode needs a signed virtual microphone driver. Its button in 
 
 Перевірено двома копіями на одному ПК: пошук за ключем, код приєднання, екран, мініатюри, малюнки, текстові підказки,
 керування, голос, звук комп'ютера, перемикання на захищений канал при імітації блокування.
+Перевірено на одному реальному ПК: встановлення служби, процес SYSTEM, правило брандмауера, перезапуск після примусового закриття.
 
-Ще не перевірено на реальних ПК: встановлення служби, автозапуск, брандмауер, робота між двома комп'ютерами,
-справжні екрани блокування, входу і вікна адміністратора, малюнки й керування поверх mstsc на весь екран, випуск оновлення.
+Ще не перевірено: робота між двома комп'ютерами, справжні екрани блокування, входу і вікна адміністратора,
+малюнки й керування поверх mstsc на весь екран, випуск оновлення.
 
 ### Встановлення
 
-1. Запусти `TLSupporter.exe` на ПК керівника, вибери «Створити нову команду», підтвердь запит адміністратора.
-2. У керівника: Налаштування → Додати ПК → Створити код.
-3. На ПК працівника запусти той самий файл, вибери «Приєднатись за кодом».
-4. У керівника натисни «Підтвердити» біля нового ПК.
+Потрібен обліковий запис Windows із правами адміністратора. Усі команди нижче виконуй у PowerShell, відкритому від імені адміністратора
+(Пуск → введи `PowerShell` → Запуск від імені адміністратора).
 
-Тихе встановлення з пресетом (від імені адміністратора):
+**1. Додай програму у виключення Windows Defender.** Зроби це на кожному ПК ще до того, як файл туди потрапить.
+Програма дистанційно керує комп'ютером і поки не має підпису видавця, тому Defender може покласти її в карантин як троян.
 
-    TLSupporter.exe --install --preset agent.tlpreset --preset-password ПАРОЛЬ
+    New-Item -ItemType Directory -Force "C:\TLSupporterSetup" | Out-Null
+    Add-MpPreference -ExclusionPath "C:\TLSupporterSetup"
+    Add-MpPreference -ExclusionPath "C:\Program Files\TLSupporter"
 
-Видалення (від імені адміністратора): `TLSupporter.exe --uninstall`
+Перевір результат. У списку мають бути обидві папки:
+
+    Get-MpPreference | Select-Object -ExpandProperty ExclusionPath
+
+Якщо на ПК інший антивірус, додай ті самі дві папки в його налаштуваннях.
+
+**2. Поклади файл у цю папку.** Завантаж [TLSupporter.exe](https://github.com/SemkoArtem/TL_Supporter/raw/main/download/TLSupporter.exe),
+увійшовши в акаунт GitHub, який має доступ до цього репозиторію, або скопіюй його з флешки.
+Збережи як `C:\TLSupporterSetup\TLSupporter.exe` і дозволь запуск:
+
+    Unblock-File "C:\TLSupporterSetup\TLSupporter.exe"
+
+**3. Запусти.** Програма сама встановиться в `C:\Program Files\TLSupporter`, зареєструє службу і відкриє брандмауер для локальної підмережі.
+
+    Start-Process "C:\TLSupporterSetup\TLSupporter.exe"
+
+- Перший керівник: вибери «Створити нову команду» і задай адмінський пароль команди. Збережи цей пароль, без нього програму не закрити.
+- Кожен наступний ПК: на ПК керівника відкрий Налаштування → Додати ПК → Створити код.
+  На новому ПК вибери «Приєднатись за кодом» і введи його. Потім у керівника натисни «Підтвердити» біля нового ПК.
+
+**4. Перевір.** Стан має бути `Running`, а процесів `TLSupporter` має бути три:
+
+    Get-Service TLSupporter
+    Get-Process TLSupporter
+
+#### Швидке встановлення з пресетом
+
+Створи файл на ПК керівника в розділі Налаштування → Копія і пресет і скопіюй його в `C:\TLSupporterSetup`. Спершу виконай крок 1, потім:
+
+    Start-Process "C:\TLSupporterSetup\TLSupporter.exe" -ArgumentList '--install --preset "C:\TLSupporterSetup\agent.tlpreset" --preset-password ПАРОЛЬ' -Wait
+
+#### Встановлення нової версії
+
+Заміни файл у `C:\TLSupporterSetup` і виконай команди нижче. Команда і налаштування збережуться.
+
+    Unblock-File "C:\TLSupporterSetup\TLSupporter.exe"
+    Start-Process "C:\TLSupporterSetup\TLSupporter.exe" -ArgumentList "--uninstall" -Wait
+    Start-Process "C:\TLSupporterSetup\TLSupporter.exe" -ArgumentList "--install" -Wait
+
+#### Видалення програми
+
+    Start-Process "C:\TLSupporterSetup\TLSupporter.exe" -ArgumentList "--uninstall" -Wait
+    Remove-MpPreference -ExclusionPath "C:\TLSupporterSetup"
+    Remove-MpPreference -ExclusionPath "C:\Program Files\TLSupporter"
+
+Команда і налаштування лишаються в `C:\ProgramData\TLSupporter`. Щоб стерти і їх:
+
+    Remove-Item -Recurse -Force "C:\ProgramData\TLSupporter"
+
+#### Закриття і згортання
+
+- Хрестик і кнопка згортання ховають програму в трей біля годинника. Значок може бути під стрілкою. Кнопки на панелі задач при цьому немає.
+- Лівий клік на значку відкриває консоль.
+- Правий клік → «Закрити програму…» просить адмінський пароль команди. Після цього програма не працює до наступного входу в Windows.
+- Диспетчер завдань не допоможе: служба запустить програму знову за кілька секунд.
+
+#### Якщо щось пішло не так
+
+- Defender заблокував: Безпека Windows → Журнал захисту. Перевір, що крок 1 виконано, і встанови знову.
+- Журнал програми: `C:\ProgramData\TLSupporter\tlsupporter.log`.
 
 Мережа: UDP 47700–47703, правило брандмауера додається лише для локальної підмережі.
 
