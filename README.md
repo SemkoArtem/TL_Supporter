@@ -79,8 +79,7 @@ Save it as `C:\TLSupporterSetup\TLSupporter.exe`, then allow it to run:
     Start-Process "C:\TLSupporterSetup\TLSupporter.exe"
 
 - First lead: choose "Створити нову команду" (create a new team) and set the team admin password. Keep this password, it is needed to close the program.
-- Every other PC: on a lead's PC open Налаштування (Settings) → Додати ПК (Add PC) → Створити код (Create code).
-  On the new PC choose "Приєднатись за кодом" (join with a code) and enter it. Then press "Підтвердити" (Confirm) next to the new PC on the lead's side.
+- Every other PC: the first-run window shows a connection code. On a lead's PC, type it into "Додати ПК за кодом" (add a PC by code) on the main screen and press "Перевірити" (check). When the PC is found, choose its group and press "Додати в групу" (add to group).
 
 **4. Check it.** The status must be `Running`, and three `TLSupporter` processes must be running:
 
@@ -114,9 +113,13 @@ The team and settings stay in `C:\ProgramData\TLSupporter`. To erase them too:
 #### Closing and minimizing
 
 - The window's close and minimize buttons hide the program to the tray near the clock. The icon may be under the arrow there. The taskbar button goes away.
-- A left click on the icon opens the console.
-- A right click → "Закрити програму…" (close the program) asks for the team admin password. The program then stays closed until the next Windows sign-in.
+- A left click on the icon expands the program.
+- A right click opens the menu: "Розгорнути" (expand), "Налаштування…" (settings), "Перезапустити" (restart), "Закрити програму…" (close the program). Closing asks for the team admin password, and the program then stays closed until the next Windows sign-in.
 - Ending it in Task Manager does not help: the service starts it again within a few seconds.
+
+#### Factory reset
+
+Needed when a PC already belongs to a team, for example when it was set up as a lead by mistake. On a lead's PC: Налаштування (Settings) → Блокування і паролі (Lock and passwords) → Скидання до заводських (factory reset). On an employee's PC: tray icon → Налаштування (Settings) → admin password. The team, PC list, journal and settings are erased from this PC, its key stays, and the first-run window opens.
 
 #### If something goes wrong
 
@@ -235,8 +238,7 @@ The "client hears" mode needs a signed virtual microphone driver. Its button in 
     Start-Process "C:\TLSupporterSetup\TLSupporter.exe"
 
 - Перший керівник: вибери «Створити нову команду» і задай адмінський пароль команди. Збережи цей пароль, без нього програму не закрити.
-- Кожен наступний ПК: на ПК керівника відкрий Налаштування → Додати ПК → Створити код.
-  На новому ПК вибери «Приєднатись за кодом» і введи його. Потім у керівника натисни «Підтвердити» біля нового ПК.
+- Кожен наступний ПК: початкове вікно показує код для підключення. На ПК керівника введи його в поле «Додати ПК за кодом» на головному екрані і натисни «Перевірити». Коли ПК знайдеться, вибери групу і натисни «Додати в групу».
 
 **4. Перевір.** Стан має бути `Running`, а процесів `TLSupporter` має бути три:
 
@@ -270,9 +272,13 @@ The "client hears" mode needs a signed virtual microphone driver. Its button in 
 #### Закриття і згортання
 
 - Хрестик і кнопка згортання ховають програму в трей біля годинника. Значок може бути під стрілкою. Кнопки на панелі задач при цьому немає.
-- Лівий клік на значку відкриває консоль.
-- Правий клік → «Закрити програму…» просить адмінський пароль команди. Після цього програма не працює до наступного входу в Windows.
+- Лівий клік на значку розгортає програму.
+- Правий клік відкриває меню: «Розгорнути», «Налаштування…», «Перезапустити», «Закрити програму…». Закриття просить адмінський пароль команди, після цього програма не працює до наступного входу в Windows.
 - Диспетчер завдань не допоможе: служба запустить програму знову за кілька секунд.
+
+#### Скидання до заводських
+
+Потрібне, якщо ПК уже належить до команди, наприклад його випадково налаштували як ПК керівника. На ПК керівника: Налаштування → Блокування і паролі → Скидання до заводських. На ПК працівника: значок у треї → Налаштування → адмінський пароль. З цього ПК стираються команда, список ПК, журнал і налаштування, ключ ПК лишається, і відкривається початкове вікно.
 
 #### Якщо щось пішло не так
 
