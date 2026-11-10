@@ -230,6 +230,7 @@ struct Settings {
     id: String,
     key: theme::KeyView,
     confirm_reset: bool,
+    new_name: String,
     voice: f32,
     connect_sound: f32,
     password: String,
@@ -246,10 +247,8 @@ impl eframe::App for Settings {
             ui.horizontal(|ui| {
                 ui.heading("TL Supporter");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // The program itself has to reopen to pick up another language.
-                    if crate::i18n::language_picker(ui) {
-                        let _ = std::fs::write(crate::util::data_dir().join(RESTART_FLAG), b"1");
-                    }
+                    // The running program notices the change by itself within a second.
+                    crate::i18n::language_picker(ui);
                 });
             });
             ui.add_space(8.0);
@@ -261,7 +260,7 @@ impl eframe::App for Settings {
                 ui.label(&st.directory.team_name);
                 ui.end_row();
                 ui.label(tr("Група:"));
-                ui.label(st.directory.group_name(&me.group));
+                ui.label(tr(&st.directory.group_name(&me.group)));
                 ui.end_row();
                 ui.label(tr("Ключ ПК:"));
                 ui.horizontal(|ui| self.key.show(ui, &self.id));
@@ -300,7 +299,7 @@ impl eframe::App for Settings {
             if !self.unlocked {
                 ui.label(tr("Для зміни налаштувань потрібен адмінський пароль:"));
                 ui.horizontal(|ui| {
-                    ui.add(egui::TextEdit::singleline(&mut self.password).password(true).desired_width(200.0));
+                    theme::field(ui, &mut self.password, "", true, 240.0);
                     if ui.button(tr("Розблокувати")).clicked() {
                         if secure_check(&st, &self.password) {
                             self.unlocked = true;
@@ -316,6 +315,14 @@ impl eframe::App for Settings {
                 }
             } else {
                 ui.label(RichText::new(tr("Адмінський режим")).strong());
+                ui.horizontal(|ui| {
+                    ui.label(tr("Ім'я:"));
+                    theme::field(ui, &mut self.new_name, "", false, 240.0);
+                    if ui.button(tr("Зберегти")).clicked() && !self.new_name.trim().is_empty() {
+                        let _ = std::fs::write(crate::util::data_dir().join(node::RENAME_FILE), self.new_name.trim());
+                        self.message = tr("Ім'я зміниться, щойно керівник буде в мережі.").into();
+                    }
+                });
                 if st.role(&self.id) == Some(Role::Lead) && st.work_as_agent && ui.button(tr("Повернутись у режим керівника")).clicked() {
                     let mut fresh = model::load_state();
                     fresh.work_as_agent = false;
@@ -327,6 +334,7 @@ impl eframe::App for Settings {
                 if ui.button(tr("Вийти з програми до наступного входу в Windows")).clicked() {
                     request_exit();
                     self.message = tr("Програму буде закрито.").into();
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
                 if self.confirm_reset {
                     ui.label(tr("Видалити команду і всі налаштування на цьому ПК?"));
@@ -412,10 +420,11 @@ pub fn run_exit_prompt() {
 pub fn run_settings(identity: Identity) {
     let _ = eframe::run_native(
         "TL Supporter",
-        options(SETTINGS_TITLE, 460.0, 460.0),
+        options(SETTINGS_TITLE, 480.0, 520.0),
         Box::new(move |cc| {
             theme::apply(&cc.egui_ctx, model::load_state().lead.light_theme);
-            Ok(Box::new(Settings { id: identity.id, key: Default::default(), confirm_reset: false, voice: crate::audio::load_voice_volume(), connect_sound: crate::audio::connect_volume(), password: String::new(), unlocked: false, error: String::new(), message: String::new() }))
+            let new_name = model::load_state().directory.member(&identity.id).map(|m| m.name.clone()).unwrap_or_default();
+            Ok(Box::new(Settings { new_name, id: identity.id, key: Default::default(), confirm_reset: false, voice: crate::audio::load_voice_volume(), connect_sound: crate::audio::connect_volume(), password: String::new(), unlocked: false, error: String::new(), message: String::new() }))
         }),
     );
 }

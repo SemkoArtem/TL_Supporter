@@ -2,7 +2,7 @@
 
 use crate::audio::{self, CaptureKind, Player};
 use crate::node::{request_repaint, JoinCode, Node, Peer};
-use crate::model::Role;
+use crate::model::{Rev, Role};
 use crate::proto::{self, DrawOp, InputEv, LeadActivity, Mode, MonitorInfo, Msg, ScreenLevel, Tool};
 use crate::secure;
 use crate::sysutil;
@@ -181,6 +181,24 @@ impl Node {
                 }
             }
             Msg::ConsentState { state } => l.targets.entry(peer.id.clone()).or_default().consent = state,
+            Msg::Rename { name } => {
+                drop(l);
+                let clean: String = name.trim().chars().take(40).collect();
+                let id = peer.id.clone();
+                let changed = !clean.is_empty() && self.state.read().directory.member(&id).is_some_and(|m| m.name != clean);
+                if changed {
+                    let log_name = clean.clone();
+                    self.update_directory(|d, me| {
+                        if let Some(m) = d.members.get_mut(&id) {
+                            m.name = clean;
+                            m.rev = Rev::new(me);
+                        }
+                    });
+                    self.audit_log(&log_name, "Змінено ім'я або групу");
+                }
+                request_repaint(self);
+                return;
+            }
             Msg::HelpRequest { id, reason } => {
                 {
                     let st = self.state.read();

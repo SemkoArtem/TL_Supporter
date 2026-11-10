@@ -35,6 +35,8 @@ pub mod icon {
     pub const PEOPLE: &str = "\u{E716}";
     pub const MORE: &str = "\u{E712}";
     pub const MISSED: &str = "\u{E7BA}";
+    pub const CHEVRON_RIGHT: &str = "\u{E76C}";
+    pub const CHEVRON_DOWN: &str = "\u{E70D}";
     pub const QUIET: &str = "\u{E708}";
     pub const MENU: &str = "\u{E700}";
     pub const BRUSH: &str = "\u{E771}";
@@ -321,6 +323,11 @@ pub fn flat_menu(ui: &mut egui::Ui, glyph: &str, hint: &str, add: impl FnOnce(&m
         w.inactive.bg_stroke = Stroke::NONE;
         ui.menu_button(glyph, add).response.on_hover_text(hint);
     });
+}
+
+/// A text box that keeps its size inside a table and is comfortable to type in.
+pub fn field(ui: &mut egui::Ui, text: &mut String, hint: &str, password: bool, width: f32) -> egui::Response {
+    ui.add_sized([width, 32.0], egui::TextEdit::singleline(text).password(password).hint_text(hint).margin(Vec2::new(8.0, 6.0)))
 }
 
 /// A thin line between groups of a command bar.

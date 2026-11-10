@@ -261,6 +261,9 @@ fn service_body() -> Result<()> {
         if let Some(ended) = check_child(&mut child, session) {
             if ended.code == EXIT_STOPPED {
                 stopped_in = Some(ended.session);
+                // Nothing of the program may stay open, such as its settings window.
+                let keep: Vec<u32> = system_child.iter().map(|c| c.pid).collect();
+                kill_other_copies(&keep);
             } else if ended.code == EXIT_BUSY {
                 // Something outside the service holds the program open, so it goes first.
                 let keep: Vec<u32> = system_child.iter().map(|c| c.pid).collect();

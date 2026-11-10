@@ -880,7 +880,7 @@ impl Ui {
         let can_ask = self.policy.show_help_button && !self.is_lead_pc;
         let reasons: Vec<(String, String)> = if can_ask && !self.help_waiting {
             let mut list = vec![(tr("Допоможіть").to_string(), String::new())];
-            list.extend(self.policy.help_reasons.iter().map(|r| (r.clone(), r.clone())));
+            list.extend(self.policy.help_reasons.iter().map(|r| (tr(r).to_string(), r.clone())));
             list
         } else {
             Vec::new()

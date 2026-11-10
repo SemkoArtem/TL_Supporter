@@ -562,8 +562,12 @@ impl Node {
             if n % 8 == 0 {
                 self.poll_clipboard();
             }
+            if n % 45 == 0 {
+                self.push_rename();
+            }
             if n % 15 == 0 {
                 audio::apply_voice_cfg();
+                crate::i18n::init();
                 let test_locked = std::env::var("TLS_DATA_DIR").is_ok() && crate::util::data_dir().join("fake.lock").exists();
                 let locked = sysutil::is_desktop_locked() || test_locked;
                 let (changed, peers) = {
@@ -586,6 +590,21 @@ impl Node {
             if n % 75 == 0 {
                 request_repaint(&self);
             }
+        }
+    }
+
+    /// Keeps offering a new name to the leads online until one of them has applied it.
+    fn push_rename(self: &Arc<Self>) {
+        let path = crate::util::data_dir().join(crate::node::RENAME_FILE);
+        let Ok(text) = std::fs::read_to_string(&path) else { return };
+        let name = text.trim().to_string();
+        let done = self.state.read().directory.member(&self.identity.id).is_some_and(|m| m.name == name);
+        if name.is_empty() || done {
+            let _ = std::fs::remove_file(&path);
+            return;
+        }
+        for l in self.agent.lock().links.values() {
+            l.peer.send(Msg::Rename { name: name.clone() });
         }
     }
 

@@ -72,6 +72,9 @@ pub struct Seen {
     pub last_ms: i64,
 }
 
+/// The new name typed on an employee's PC, waiting for a lead to accept it.
+pub const RENAME_FILE: &str = "rename.req";
+
 pub struct JoinCode {
     pub code: String,
     pub role: Role,

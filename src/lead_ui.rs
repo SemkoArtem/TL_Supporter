@@ -94,6 +94,11 @@ pub struct LeadApp {
     pointer_last_ms: i64,
     pointer_last: [f32; 2],
     hints_open: bool,
+    selected: std::collections::HashSet<String>,
+    collapsed: std::collections::HashSet<String>,
+    renaming: Option<(String, String)>,
+    confirm_delete_group: Option<String>,
+    confirm_revoke: bool,
     hint: String,
     control: bool,
     last_move: Pos2,
@@ -152,7 +157,7 @@ impl LeadApp {
         *node.repaint.lock() = Some(cc.egui_ctx.clone());
         let (reasons, repo, personal) = {
             let st = node.state.read();
-            (st.directory.policy.help_reasons.join("\n"), st.directory.policy.update_repo.clone(), st.lead.personal_phrases.join("\n"))
+            (st.directory.policy.help_reasons.iter().map(|r| tr(r)).collect::<Vec<_>>().join("\n"), st.directory.policy.update_repo.clone(), st.lead.personal_phrases.join("\n"))
         };
         Self {
             node,
@@ -170,6 +175,11 @@ impl LeadApp {
             pointer_last_ms: 0,
             pointer_last: [0.0, 0.0],
             hints_open: true,
+            selected: Default::default(),
+            collapsed: Default::default(),
+            renaming: None,
+            confirm_delete_group: None,
+            confirm_revoke: false,
             hint: String::new(),
             control: false,
             last_move: Pos2::ZERO,
@@ -434,10 +444,10 @@ impl LeadApp {
                 let phrases = self.phrases();
                 ui.menu_button(tr("Готові фрази"), |ui| {
                     for (set, list) in phrases {
-                        ui.menu_button(set, |ui| {
+                        ui.menu_button(tr(&set), |ui| {
                             for p in list {
-                                if ui.button(&p).clicked() {
-                                    self.node.lead_send_hint(target, p.clone());
+                                if ui.button(tr(&p)).clicked() {
+                                    self.node.lead_send_hint(target, tr(&p).to_string());
                                     ui.close_menu();
                                 }
                             }
@@ -494,7 +504,7 @@ impl LeadApp {
             for h in items {
                 ui.horizontal(|ui| {
                     let name = self.node.member_name(&h.target);
-                    let reason = if h.reason.is_empty() { String::new() } else { format!(" — {}", h.reason) };
+                    let reason = if h.reason.is_empty() { String::new() } else { format!(" — {}", tr(&h.reason)) };
                     let missed = h.is_missed(now_ms());
                     if missed {
                         ui.colored_label(theme::danger(), icon::MISSED).on_hover_text(tr("Ніхто не взяв цей запит"));
@@ -534,6 +544,15 @@ impl LeadApp {
             theme::card(ui, "", |ui| self.add_by_code(ui));
             ui.horizontal(|ui| {
                 ui.add(egui::TextEdit::singleline(&mut self.search).desired_width(260.0).hint_text(tr("Пошук за іменем")));
+                ui.add_space(12.0);
+                ui.add(egui::TextEdit::singleline(&mut self.draft.new_group).desired_width(180.0).hint_text(tr("Назва групи")));
+                if ui.button(tr("Додати групу")).clicked() && !self.draft.new_group.trim().is_empty() {
+                    let name = std::mem::take(&mut self.draft.new_group).trim().to_string();
+                    self.node.update_directory(|d, me| {
+                        let id = secure::b64(&secure::random_bytes::<6>());
+                        d.groups.insert(id.clone(), Group { id, name, deleted: false, rev: Rev::new(me) });
+                    });
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if theme::tool_button(ui, icon::GRID, grid_view, tr("Мініатюри")).clicked() {
                         self.save_lead(|l| l.grid_view = true);
@@ -544,29 +563,193 @@ impl LeadApp {
                 });
             });
             ui.add_space(8.0);
+            let groups = self.visible_groups();
+            let known: std::collections::HashSet<&String> = groups.iter().flat_map(|g| g.2.iter()).collect();
+            self.selected.retain(|id| known.contains(id));
+            if !self.selected.is_empty() {
+                self.selection_bar(ui);
+            }
             egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
                 self.pending_section(ui);
-                let groups = self.visible_groups();
-                if groups.is_empty() {
+                if groups.iter().all(|g| g.2.is_empty()) {
                     ui.add_space(30.0);
                     ui.vertical_centered(|ui| ui.weak(tr("Поки немає жодного ПК. Запусти програму на новому ПК і введи код, який вона покаже.")));
                 }
-                for (gid, gname, members) in groups {
-                    let online = members.iter().filter(|m| self.node.peer(m).is_some()).count();
-                    egui::CollapsingHeader::new(RichText::new(format!("{gname}   {online}/{}", members.len())).strong().size(15.0))
-                        .id_salt(&gid)
-                        .default_open(true)
-                        .show_unindented(ui, |ui| {
-                            ui.add_space(4.0);
-                            if grid_view {
-                                self.grid(ui, ctx, &members);
-                            } else {
-                                for m in &members {
-                                    self.row(ui, m);
-                                }
+                for (gid, gname, members) in &groups {
+                    self.group_header(ui, gid, gname, members);
+                    if self.collapsed.contains(gid) {
+                        continue;
+                    }
+                    ui.add_space(4.0);
+                    if grid_view {
+                        self.grid(ui, ctx, members);
+                    } else {
+                        for m in members {
+                            self.row(ui, m);
+                        }
+                    }
+                    ui.add_space(8.0);
+                }
+            });
+        });
+    }
+
+    fn group_header(&mut self, ui: &mut egui::Ui, gid: &str, name: &str, members: &[String]) {
+        let online = members.iter().filter(|m| self.node.peer(m).is_some()).count();
+        ui.horizontal(|ui| {
+            let collapsed = self.collapsed.contains(gid);
+            if ui.add(egui::Button::new(if collapsed { icon::CHEVRON_RIGHT } else { icon::CHEVRON_DOWN }).frame(false)).clicked() {
+                if collapsed {
+                    self.collapsed.remove(gid);
+                } else {
+                    self.collapsed.insert(gid.to_string());
+                }
+            }
+            let mut all = !members.is_empty() && members.iter().all(|m| self.selected.contains(m));
+            if ui.add_enabled(!members.is_empty(), egui::Checkbox::without_text(&mut all)).on_hover_text(tr("Вибрати всю групу")).changed() {
+                for m in members {
+                    if all {
+                        self.selected.insert(m.clone());
+                    } else {
+                        self.selected.remove(m);
+                    }
+                }
+            }
+            let renaming = self.renaming.as_ref().is_some_and(|r| r.0 == gid);
+            if renaming {
+                let mut text = self.renaming.as_ref().map(|r| r.1.clone()).unwrap_or_default();
+                let field = theme::field(ui, &mut text, "", false, 220.0);
+                let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if let Some(r) = self.renaming.as_mut() {
+                    r.1 = text.clone();
+                }
+                if ui.button(tr("Зберегти")).clicked() || enter {
+                    let (id, new_name) = (gid.to_string(), text.trim().to_string());
+                    if !new_name.is_empty() {
+                        self.node.update_directory(|d, me| {
+                            if let Some(g) = d.groups.get_mut(&id) {
+                                g.name = new_name;
+                                g.rev = Rev::new(me);
                             }
-                            ui.add_space(6.0);
                         });
+                    }
+                    self.renaming = None;
+                }
+                if ui.button(tr("Скасувати")).clicked() {
+                    self.renaming = None;
+                }
+                return;
+            }
+            ui.label(RichText::new(name).strong().size(15.0));
+            ui.weak(format!("{online}/{}", members.len()));
+            if gid.is_empty() {
+                return;
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if self.confirm_delete_group.as_deref() == Some(gid) {
+                    if ui.button(tr("Скасувати")).clicked() {
+                        self.confirm_delete_group = None;
+                    }
+                    if ui.button(tr("Так, видалити")).clicked() {
+                        self.delete_group(gid);
+                        self.confirm_delete_group = None;
+                    }
+                    ui.label(tr("ПК перейдуть у «Без групи»"));
+                } else {
+                    if theme::tool_button(ui, icon::CLOSE, false, tr("Видалити групу")).clicked() {
+                        self.confirm_delete_group = Some(gid.to_string());
+                    }
+                    if theme::tool_button(ui, icon::PEN, false, tr("Перейменувати групу")).clicked() {
+                        self.renaming = Some((gid.to_string(), name.to_string()));
+                    }
+                }
+            });
+        });
+    }
+
+    fn delete_group(&self, gid: &str) {
+        let id = gid.to_string();
+        self.node.update_directory(|d, me| {
+            if let Some(g) = d.groups.get_mut(&id) {
+                g.deleted = true;
+                g.rev = Rev::new(me);
+            }
+            for m in d.members.values_mut() {
+                let mut changed = false;
+                if m.group == id {
+                    m.group.clear();
+                    changed = true;
+                }
+                if m.lead_groups.contains(&id) {
+                    m.lead_groups.retain(|g| *g != id);
+                    changed = true;
+                }
+                if changed {
+                    m.rev = Rev::new(me);
+                }
+            }
+        });
+    }
+
+    /// Appears as soon as at least one PC is ticked.
+    fn selection_bar(&mut self, ui: &mut egui::Ui) {
+        let ids: Vec<String> = self.selected.iter().cloned().collect();
+        let opts = self.group_options();
+        theme::card(ui, "", |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.strong(format!("{}: {}", tr("Вибрано"), ids.len()));
+                ui.add_space(8.0);
+                ui.menu_button(tr("Перемістити в групу"), |ui| {
+                    for (group, name) in &opts {
+                        if ui.button(name).clicked() {
+                            let (targets, group) = (ids.clone(), group.clone());
+                            self.node.update_directory(|d, me| {
+                                for id in &targets {
+                                    if let Some(m) = d.members.get_mut(id) {
+                                        m.group = group.clone();
+                                        m.rev = Rev::new(me);
+                                    }
+                                }
+                            });
+                            self.node.audit_log(name, "Переміщено в групу");
+                            self.selected.clear();
+                            ui.close_menu();
+                        }
+                    }
+                });
+                if ids.len() == 1 && ui.button(tr("Перейменувати")).clicked() {
+                    self.member_dialog = Some(self.dialog_for(&ids[0]));
+                }
+                let muted = self.node.state.read().lead.muted_help.clone();
+                let all_muted = ids.iter().all(|i| muted.contains(i));
+                if ui.button(if all_muted { tr("Увімкнути запити") } else { tr("Вимкнути запити") }).clicked() {
+                    let targets = ids.clone();
+                    self.save_lead(|l| {
+                        l.muted_help.retain(|x| !targets.contains(x));
+                        if !all_muted {
+                            l.muted_help.extend(targets.iter().cloned());
+                        }
+                    });
+                }
+                if self.confirm_revoke {
+                    ui.colored_label(theme::danger(), tr("Скасувати доступ вибраним ПК?"));
+                    if ui.button(tr("Так, скасувати")).clicked() {
+                        for id in &ids {
+                            let name = self.node.member_name(id);
+                            self.revoke(id, &name);
+                        }
+                        self.selected.clear();
+                        self.confirm_revoke = false;
+                    }
+                    if ui.button(tr("Ні")).clicked() {
+                        self.confirm_revoke = false;
+                    }
+                } else if ui.button(tr("Скасувати доступ")).clicked() {
+                    self.confirm_revoke = true;
+                }
+                if ui.button(tr("Зняти вибір")).clicked() {
+                    self.selected.clear();
+                    self.confirm_revoke = false;
                 }
             });
         });
@@ -577,6 +760,7 @@ impl LeadApp {
         let needle = self.search.to_lowercase();
         let d = &st.directory;
         let me = &self.node.identity.id;
+        let exists = |g: &str| d.groups.get(g).is_some_and(|x| !x.deleted);
         let mut map: std::collections::BTreeMap<String, Vec<String>> = Default::default();
         for m in d.members.values() {
             if m.state != MemberState::Approved || &m.id == me || !d.lead_can_reach(me, &m.id) {
@@ -585,17 +769,25 @@ impl LeadApp {
             if !needle.is_empty() && !m.name.to_lowercase().contains(&needle) {
                 continue;
             }
-            map.entry(m.group.clone()).or_default().push(m.id.clone());
+            // A PC whose group is gone belongs with the PCs that have no group.
+            let key = if exists(&m.group) { m.group.clone() } else { String::new() };
+            map.entry(key).or_default().push(m.id.clone());
+        }
+        if needle.is_empty() {
+            let allowed = d.member(me).map(|m| m.lead_groups.clone()).unwrap_or_default();
+            for g in d.groups.values().filter(|g| !g.deleted && (allowed.is_empty() || allowed.contains(&g.id))) {
+                map.entry(g.id.clone()).or_default();
+            }
         }
         let mut out: Vec<(String, String, Vec<String>)> = map
             .into_iter()
             .map(|(g, mut v)| {
                 v.sort_by_key(|id| d.member(id).map(|m| m.name.to_lowercase()).unwrap_or_default());
-                let name = d.group_name(&g);
+                let name = tr(&d.group_name(&g)).to_string();
                 (g, name, v)
             })
             .collect();
-        out.sort_by(|a, b| a.1.cmp(&b.1));
+        out.sort_by(|a, b| (a.0.is_empty(), &a.1).cmp(&(b.0.is_empty(), &b.1)));
         out
     }
 
@@ -721,6 +913,14 @@ impl LeadApp {
         let (dot, status) = self.member_status(id, locked);
         let online = self.node.is_reachable(id);
         theme::row_card(ui, |ui| {
+            let mut ticked = self.selected.contains(id);
+            if ui.add(egui::Checkbox::without_text(&mut ticked)).changed() {
+                if ticked {
+                    self.selected.insert(id.to_string());
+                } else {
+                    self.selected.remove(id);
+                }
+            }
             let avatar = theme::avatar(ui, &name, color_for(id), dot, 36.0);
             avatar.context_menu(|ui| self.member_menu(ui, id, &name));
             ui.vertical(|ui| {
@@ -790,6 +990,14 @@ impl LeadApp {
                     r.context_menu(|ui| self.member_menu(ui, id, &name));
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
+                        let mut ticked = self.selected.contains(id);
+                        if ui.add(egui::Checkbox::without_text(&mut ticked)).changed() {
+                            if ticked {
+                                self.selected.insert(id.clone());
+                            } else {
+                                self.selected.remove(id);
+                            }
+                        }
                         theme::avatar(ui, &name, color_for(id), dot, 26.0);
                         ui.add(egui::Label::new(RichText::new(&name).strong()).truncate());
                     });
@@ -1391,17 +1599,17 @@ impl LeadApp {
         }
         theme::card(ui, tr("Паролі"), |ui| {
             egui::Grid::new("passwords").num_columns(3).spacing([12.0, 8.0]).show(ui, |ui| {
-                ui.label(tr("Пароль консолі"));
-                ui.add(egui::TextEdit::singleline(&mut self.draft.new_console_pw).password(true).desired_width(220.0));
+                ui.label(tr("Пароль програми"));
+                theme::field(ui, &mut self.draft.new_console_pw, "", true, 300.0);
                 if ui.button(tr("Змінити")).clicked() && !self.draft.new_console_pw.is_empty() {
                     let h = secure::hash_password(&self.draft.new_console_pw);
                     self.draft.new_console_pw.clear();
                     self.save_lead(|l| l.console_password = h);
-                    self.draft.message = tr("Пароль консолі змінено.").into();
+                    self.draft.message = tr("Пароль програми змінено.").into();
                 }
                 ui.end_row();
                 ui.label(tr("Адмінський пароль команди"));
-                ui.add(egui::TextEdit::singleline(&mut self.draft.new_admin_pw).password(true).desired_width(220.0));
+                theme::field(ui, &mut self.draft.new_admin_pw, "", true, 300.0);
                 if ui.button(tr("Змінити")).clicked() && !self.draft.new_admin_pw.is_empty() {
                     let h = secure::hash_password(&self.draft.new_admin_pw);
                     self.draft.new_admin_pw.clear();
@@ -1419,7 +1627,7 @@ impl LeadApp {
         egui::CollapsingHeader::new(tr("Додатково")).show_unindented(ui, |ui| {
             theme::card(ui, "", |ui| {
                 egui::Grid::new("danger").num_columns(2).spacing([12.0, 10.0]).show(ui, |ui| {
-                    ui.add(egui::TextEdit::singleline(&mut self.draft.exit_pw).password(true).desired_width(220.0).hint_text(tr("Адмінський пароль")));
+                    theme::field(ui, &mut self.draft.exit_pw, tr("Адмінський пароль"), true, 300.0);
                     if ui.button(tr("Вийти з програми")).clicked() {
                         let admin = self.node.state.read().directory.policy.admin_password.clone();
                         if !self.draft.exit_pw.is_empty() && secure::check_password(&admin, &self.draft.exit_pw) {
@@ -1430,7 +1638,7 @@ impl LeadApp {
                         self.draft.message = tr("Невірний адмінський пароль.").into();
                     }
                     ui.end_row();
-                    ui.add(egui::TextEdit::singleline(&mut self.draft.reset_pw).password(true).desired_width(220.0).hint_text(tr("Адмінський пароль")));
+                    theme::field(ui, &mut self.draft.reset_pw, tr("Адмінський пароль"), true, 300.0);
                     if ui.button(tr("Скинути до заводських")).on_hover_text(tr("Видаляє команду, список ПК, журнал і налаштування на цьому ПК")).clicked() {
                         let admin = self.node.state.read().directory.policy.admin_password.clone();
                         if !self.draft.reset_pw.is_empty() && secure::check_password(&admin, &self.draft.reset_pw) {
@@ -1601,8 +1809,8 @@ impl LeadApp {
         let sets: Vec<PhraseSet> = self.node.state.read().directory.phrases.values().filter(|p| !p.deleted).cloned().collect();
         theme::card(ui, tr("Спільні фрази команди"), |ui| {
             for set in sets {
-                ui.strong(&set.name);
-                let text = self.draft.phrase_edit.entry(set.id.clone()).or_insert_with(|| set.phrases.join("\n"));
+                ui.strong(tr(&set.name));
+                let text = self.draft.phrase_edit.entry(set.id.clone()).or_insert_with(|| set.phrases.iter().map(|p| tr(p)).collect::<Vec<_>>().join("\n"));
                 ui.add(egui::TextEdit::multiline(text).desired_rows(3).desired_width(f32::INFINITY));
                 let current = text.clone();
                 ui.horizontal(|ui| {
@@ -1645,7 +1853,7 @@ impl LeadApp {
     fn group_options(&self) -> Vec<(String, String)> {
         let st = self.node.state.read();
         let mut v: Vec<(String, String)> = vec![(String::new(), tr("Без групи").to_string())];
-        v.extend(st.directory.groups.values().filter(|g| !g.deleted).map(|g| (g.id.clone(), g.name.clone())));
+        v.extend(st.directory.groups.values().filter(|g| !g.deleted).map(|g| (g.id.clone(), tr(&g.name).to_string())));
         v
     }
 
@@ -1670,35 +1878,6 @@ impl LeadApp {
                 ui.add_space(6.0);
                 ui.label(RichText::new(code).size(26.0).strong());
             }
-        });
-        theme::card(ui, tr("Групи"), |ui| {
-            let groups: Vec<Group> = self.node.state.read().directory.groups.values().filter(|g| !g.deleted).cloned().collect();
-            for g in groups {
-                ui.horizontal(|ui| {
-                    ui.label(&g.name);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if theme::tool_button(ui, icon::CLOSE, false, tr("Видалити")).clicked() {
-                            let id = g.id.clone();
-                            self.node.update_directory(|d, me| {
-                                if let Some(x) = d.groups.get_mut(&id) {
-                                    x.deleted = true;
-                                    x.rev = Rev::new(me);
-                                }
-                            });
-                        }
-                    });
-                });
-            }
-            ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut self.draft.new_group).desired_width(220.0).hint_text(tr("Назва групи")));
-                if ui.button(tr("Додати групу")).clicked() && !self.draft.new_group.trim().is_empty() {
-                    let name = std::mem::take(&mut self.draft.new_group);
-                    self.node.update_directory(|d, me| {
-                        let id = secure::b64(&secure::random_bytes::<6>());
-                        d.groups.insert(id.clone(), Group { id, name, deleted: false, rev: Rev::new(me) });
-                    });
-                }
-            });
         });
         theme::card(ui, tr("Права керівників"), |ui| self.settings_leads(ui));
     }
