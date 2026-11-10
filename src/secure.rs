@@ -124,6 +124,16 @@ impl Identity {
                 bytes
             }
         };
+        Self::from_pkcs8(pkcs8)
+    }
+
+    /// For the SYSTEM process, which must not create files in the folder open to every user.
+    pub fn load_existing() -> Result<Self> {
+        let blob = std::fs::read(crate::util::data_dir().join("device.key"))?;
+        Self::from_pkcs8(dpapi_unprotect(&blob).context("device key belongs to another PC")?)
+    }
+
+    fn from_pkcs8(pkcs8: Vec<u8>) -> Result<Self> {
         let pair = signature::Ed25519KeyPair::from_pkcs8(&pkcs8).map_err(|_| anyhow!("bad device key"))?;
         use signature::KeyPair;
         let public = pair.public_key().as_ref().to_vec();

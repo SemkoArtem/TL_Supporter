@@ -15,7 +15,6 @@ use anyhow::{anyhow, bail, Result};
 use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::sync::mpsc as std_mpsc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,38 +28,12 @@ enum InputCmd {
     ReleaseAll,
 }
 
-/// The team this PC belongs to, remembered where ordinary users cannot write. The team data
-/// file can be changed by anyone signed in here, so it alone cannot say who may use this process.
-#[derive(Clone)]
-struct TeamPin {
-    team_id: String,
-    authority_b64: String,
-}
-
-fn pin_path() -> Option<PathBuf> {
-    if crate::util::test_env("TLS_DATA_DIR").is_some() {
-        return Some(crate::util::data_dir().join("team.pin"));
-    }
-    let base = std::env::var("ProgramFiles").ok()?;
-    let dir = PathBuf::from(base).join("TLSupporterData");
-    std::fs::create_dir_all(&dir).ok()?;
-    Some(dir.join("team.pin"))
-}
-
-fn load_pin() -> Option<TeamPin> {
-    let text = std::fs::read_to_string(pin_path()?).ok()?;
-    let (team_id, authority_b64) = text.split_once('\n')?;
-    Some(TeamPin { team_id: team_id.to_string(), authority_b64: authority_b64.trim().to_string() })
-}
-
 /// Lets the next team on this PC be remembered, for example after a factory reset.
 pub fn clear_pin() -> Result<()> {
     if !crate::service::is_admin() {
         bail!("потрібні права адміністратора");
     }
-    if let Some(path) = pin_path() {
-        let _ = std::fs::remove_file(path);
-    }
+    model::remove_team_pin();
     Ok(())
 }
 
@@ -74,7 +47,7 @@ struct Link {
 struct Secure {
     identity: Identity,
     state: RwLock<LocalState>,
-    pin: RwLock<Option<TeamPin>>,
+    pin: RwLock<Option<model::TeamPin>>,
     hub: Arc<CaptureHub>,
     holder: Mutex<Option<String>>,
     links: Mutex<HashMap<String, Link>>,
@@ -94,24 +67,25 @@ impl Secure {
 
     /// Remember the team the first time this PC has one.
     fn refresh_pin(&self) {
-        if self.pin.read().is_some() {
-            return;
-        }
-        if let Some(pin) = load_pin() {
-            *self.pin.write() = Some(pin);
-            return;
-        }
-        let pin = {
+        let known = self.pin.read().clone().or_else(model::load_team_pin);
+        let next = {
             let st = self.state.read();
-            if st.directory.is_empty() {
-                return;
+            let d = &st.directory;
+            match known {
+                Some(mut pin) => {
+                    pin.signed |= d.team_id == pin.team_id && d.admin_password_signed_by(&pin.authority_b64);
+                    pin
+                }
+                None if d.is_empty() => return,
+                None => model::TeamPin { team_id: d.team_id.clone(), authority_b64: d.authority_public_b64.clone(), signed: d.admin_password_signed_by(&d.authority_public_b64) },
             }
-            TeamPin { team_id: st.directory.team_id.clone(), authority_b64: st.directory.authority_public_b64.clone() }
         };
-        let saved = pin_path().map(|p| std::fs::write(p, format!("{}\n{}", pin.team_id, pin.authority_b64)).is_ok()).unwrap_or(false);
-        if saved {
+        if self.pin.read().as_ref() == Some(&next) {
+            return;
+        }
+        if model::save_team_pin(&next) {
             crate::logi!("team remembered for secure screens");
-            *self.pin.write() = Some(pin);
+            *self.pin.write() = Some(next);
         } else {
             crate::logi!("could not remember the team, secure screens stay closed");
         }
@@ -176,12 +150,12 @@ impl Secure {
                 self.broadcast_holder();
             }
             Msg::Input(ev) => {
-                if self.holder.lock().as_deref() == Some(lead) {
+                if rights.control && self.holder.lock().as_deref() == Some(lead) {
                     let _ = self.input.send(InputCmd::Event(ev, monitor));
                 }
             }
             Msg::SendSas => {
-                if self.holder.lock().as_deref() == Some(lead) {
+                if rights.control && self.holder.lock().as_deref() == Some(lead) {
                     let _ = self.input.send(InputCmd::Sas);
                 }
             }
@@ -225,7 +199,13 @@ impl Secure {
 
         let (tx, mut rx) = mpsc::unbounded_channel::<Msg>();
         let _ = tx.send(Msg::ScreenInfo(capture::list_monitors()));
-        self.links.lock().insert(lead.clone(), Link { conn: conn.clone(), tx, mode: Mode::default(), screen_task: None });
+        let replaced = self.links.lock().insert(lead.clone(), Link { conn: conn.clone(), tx, mode: Mode::default(), screen_task: None });
+        if let Some(old) = replaced {
+            if let Some(t) = old.screen_task {
+                t.abort();
+            }
+            old.conn.close(1u32.into(), b"replaced");
+        }
         self.broadcast_holder();
         crate::logi!("secure link from {lead}");
         let writer = tokio::spawn(async move {
@@ -245,6 +225,12 @@ impl Secure {
         }
         .await;
         writer.abort();
+        // After a network drop the lead may already be back on a new connection, which must stay.
+        let replaced = self.links.lock().get(&lead).is_some_and(|l| l.conn.stable_id() != conn.stable_id());
+        if replaced {
+            conn.close(1u32.into(), b"closed");
+            return result;
+        }
         if let Some(l) = self.links.lock().remove(&lead) {
             if let Some(t) = l.screen_task {
                 t.abort();
@@ -321,6 +307,13 @@ impl Secure {
                 last = now;
                 *self.state.write() = model::load_state();
                 self.refresh_pin();
+                // The right to control can be withdrawn while someone is using it.
+                let holder = self.holder.lock().clone();
+                if holder.is_some_and(|h| !self.allowed(&h).is_some_and(|r| r.control)) {
+                    *self.holder.lock() = None;
+                    let _ = self.input.send(InputCmd::ReleaseAll);
+                    self.broadcast_holder();
+                }
                 let leads: Vec<String> = self.links.lock().keys().cloned().collect();
                 for id in leads.iter().filter(|l| self.allowed(l).is_none()) {
                     if let Some(link) = self.links.lock().remove(id) {

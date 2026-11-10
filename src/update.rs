@@ -66,14 +66,24 @@ fn store_pending(version: &str, exe: &[u8], sig: &[u8]) -> Result<()> {
 /// user, so whatever gets installed must be exactly the bytes that were checked.
 pub fn pending_update() -> Option<Vec<u8>> {
     let dir = update_dir();
+    if std::fs::metadata(dir.join("new.exe")).ok()?.len() > MAX_SIZE {
+        return None;
+    }
     let exe = std::fs::read(dir.join("new.exe")).ok()?;
     let sig = std::fs::read(dir.join("new.sig")).ok()?;
     let version = std::fs::read_to_string(dir.join("new.ver")).ok()?;
-    if verify_release(&version, &exe, &sig) && is_newer(&version, APP_VERSION) {
-        Some(exe)
-    } else {
-        let _ = std::fs::remove_file(dir.join("new.exe"));
-        None
+    // Only reads: the service runs as SYSTEM and this folder is open to every user.
+    (verify_release(&version, &exe, &sig) && is_newer(&version, APP_VERSION)).then_some(exe)
+}
+
+/// Run by the user's program: removes an update that is already installed.
+pub fn discard_stale_update() {
+    let dir = update_dir();
+    let newer = std::fs::read_to_string(dir.join("new.ver")).is_ok_and(|v| is_newer(v.trim(), APP_VERSION));
+    if !newer {
+        for file in ["new.exe", "new.sig", "new.ver"] {
+            let _ = std::fs::remove_file(dir.join(file));
+        }
     }
 }
 

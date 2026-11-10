@@ -119,6 +119,8 @@ pub struct Policy {
     pub update_repo: String,
     /// How long a new hint stays on the employee's screen. Never less than 10 seconds.
     pub hint_show_sec: u32,
+    /// A lead's signature over the admin password hash, so that an employee cannot replace it.
+    pub admin_sig_b64: String,
     pub rev: Rev,
 }
 
@@ -138,6 +140,7 @@ impl Default for Policy {
             show_help_button: true,
             update_repo: String::new(),
             hint_show_sec: 10,
+            admin_sig_b64: String::new(),
             rev: Rev::default(),
         }
     }
@@ -191,6 +194,7 @@ impl Directory {
         };
         d.policy.admin_password = password_hash;
         d.policy.rev = Rev::new(&identity.id);
+        d.sign_admin_password();
         d.members.insert(
             identity.id.clone(),
             Member {
@@ -261,6 +265,19 @@ impl Directory {
         changed
     }
 
+    /// Only leads can do this, because only they hold the team's private key.
+    pub fn sign_admin_password(&mut self) {
+        let Ok(private) = secure::unb64(&self.authority_private_b64) else { return };
+        if let Ok(sig) = secure::sign(&private, &admin_message(&self.team_id, &self.policy.admin_password)) {
+            self.policy.admin_sig_b64 = secure::b64(&sig);
+        }
+    }
+
+    pub fn admin_password_signed_by(&self, authority_b64: &str) -> bool {
+        let (Ok(authority), Ok(sig)) = (secure::unb64(authority_b64), secure::unb64(&self.policy.admin_sig_b64)) else { return false };
+        secure::verify(&authority, &admin_message(&self.team_id, &self.policy.admin_password), &sig)
+    }
+
     /// Stamps already stored here count as seen.
     pub fn observe_stamps(&self) {
         self.members.values().for_each(|m| Rev::observe(m.rev.ts));
@@ -313,6 +330,68 @@ impl Directory {
     pub fn check_lead_proof(&self, public: &[u8], proof: &[u8]) -> bool {
         verify_lead_proof(&self.authority_public_b64, &self.team_id, public, proof)
     }
+}
+
+fn admin_message(team_id: &str, hash: &str) -> Vec<u8> {
+    format!("tlsupporter-admin:{team_id}:{hash}").into_bytes()
+}
+
+/// The team this PC belongs to, kept where ordinary users cannot write.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TeamPin {
+    pub team_id: String,
+    pub authority_b64: String,
+    /// A validly signed admin password has been seen, so an unsigned one no longer counts.
+    pub signed: bool,
+}
+
+fn team_pin_path() -> Option<PathBuf> {
+    Some(crate::util::secure_dir()?.join("team.pin"))
+}
+
+pub fn load_team_pin() -> Option<TeamPin> {
+    let text = std::fs::read_to_string(team_pin_path()?).ok()?;
+    let mut lines = text.lines();
+    Some(TeamPin { team_id: lines.next()?.to_string(), authority_b64: lines.next()?.trim().to_string(), signed: lines.next() == Some("1") })
+}
+
+pub fn save_team_pin(pin: &TeamPin) -> bool {
+    let Some(path) = team_pin_path() else { return false };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(path, format!("{}\n{}\n{}", pin.team_id, pin.authority_b64, if pin.signed { "1" } else { "0" })).is_ok()
+}
+
+pub fn remove_team_pin() {
+    if let Some(path) = team_pin_path() {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// The admin password check on an employee's PC. The data file can be edited by anyone signed
+/// in there, so a password hash only counts when a lead of the remembered team signed it.
+pub fn admin_password_accepted(st: &LocalState, pin: Option<&TeamPin>, password: &str) -> bool {
+    if let Some(pin) = pin {
+        let same_team = st.directory.team_id == pin.team_id;
+        let signed = same_team && st.directory.admin_password_signed_by(&pin.authority_b64);
+        if !same_team || (pin.signed && !signed) {
+            return false;
+        }
+    }
+    secure::check_password(&st.directory.policy.admin_password, password)
+}
+
+pub fn admin_password_ok(st: &LocalState, password: &str) -> bool {
+    !password.is_empty() && admin_password_accepted(st, load_team_pin().as_ref(), password)
+}
+
+const MAX_JOURNAL: usize = 20_000;
+
+/// Keeps the newest entries, otherwise the journal would outgrow what one message can carry.
+pub fn trim_journal(log: &mut Vec<LogEntry>) {
+    let excess = log.len().saturating_sub(MAX_JOURNAL);
+    log.drain(..excess);
 }
 
 pub fn verify_lead_proof(authority_b64: &str, team_id: &str, public: &[u8], proof: &[u8]) -> bool {
@@ -489,8 +568,7 @@ pub fn merge_audit(mine: &mut Vec<LogEntry>, other: &[LogEntry]) -> bool {
     let changed = mine.len() != before;
     if changed {
         mine.sort_by_key(|e| e.ts);
-        let excess = mine.len().saturating_sub(20_000);
-        mine.drain(..excess);
+        trim_journal(mine);
     }
     changed
 }
@@ -548,6 +626,51 @@ mod tests {
         let proof = d.lead_proof(b"pk").unwrap();
         assert!(copy.check_lead_proof(b"pk", &proof));
         assert!(!copy.check_lead_proof(b"other", &proof));
+    }
+
+    #[test]
+    fn a_replaced_admin_password_is_refused() {
+        let id = identity(1);
+        let (private, public) = secure::generate_authority().unwrap();
+        let mut d = Directory::new("T", &id, "L", secure::hash_password("realpassword")).unwrap();
+        d.authority_private_b64 = secure::b64(&private);
+        d.authority_public_b64 = secure::b64(&public);
+        d.sign_admin_password();
+        let pin = TeamPin { team_id: d.team_id.clone(), authority_b64: d.authority_public_b64.clone(), signed: true };
+        let good = LocalState { directory: d.clone(), ..Default::default() };
+        assert!(admin_password_accepted(&good, Some(&pin), "realpassword"));
+        assert!(!admin_password_accepted(&good, Some(&pin), "wrong"));
+
+        let mut forged = good.clone();
+        forged.directory.policy.admin_password = secure::hash_password("attacker");
+        assert!(!admin_password_accepted(&forged, Some(&pin), "attacker"));
+        forged.directory.policy.admin_sig_b64.clear();
+        assert!(!admin_password_accepted(&forged, Some(&pin), "attacker"));
+        forged.directory.policy.admin_password.clear();
+        assert!(!admin_password_accepted(&forged, Some(&pin), "anything"));
+
+        let mut other_team = good.clone();
+        other_team.directory.team_id = "other".into();
+        assert!(!admin_password_accepted(&other_team, Some(&pin), "realpassword"));
+    }
+
+    #[test]
+    fn a_team_not_yet_signed_keeps_working_until_a_signature_is_seen() {
+        let id = identity(1);
+        let mut d = Directory::new("T", &id, "L", secure::hash_password("realpassword")).unwrap();
+        d.policy.admin_sig_b64.clear();
+        let pin = TeamPin { team_id: d.team_id.clone(), authority_b64: d.authority_public_b64.clone(), signed: false };
+        let st = LocalState { directory: d, ..Default::default() };
+        assert!(admin_password_accepted(&st, Some(&pin), "realpassword"));
+        assert!(admin_password_accepted(&st, None, "realpassword"));
+    }
+
+    #[test]
+    fn journal_keeps_only_the_newest_entries() {
+        let mut log: Vec<LogEntry> = (0..20_005).map(|i| LogEntry { ts: i, ..Default::default() }).collect();
+        trim_journal(&mut log);
+        assert_eq!(log.len(), 20_000);
+        assert_eq!(log[0].ts, 5);
     }
 
     #[test]

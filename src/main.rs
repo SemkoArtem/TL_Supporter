@@ -103,6 +103,8 @@ fn run_app(identity: Identity) -> Result<()> {
     let (ui_handle, rx) = agent_ui::UiHandle::new();
     let node = node::start(identity, state, ui_handle.clone())?;
     node.sync_employee_mode();
+    node.ensure_admin_signature();
+    update::discard_stale_update();
     node.console_started.store(if is_lead { 2 } else { 1 }, std::sync::atomic::Ordering::Relaxed);
     // The role may have changed while the network was starting.
     if node.state.read().console_mode(&node.identity.id) != is_lead {
@@ -154,10 +156,17 @@ fn real_main() -> Result<()> {
         return secure_agent::clear_pin();
     }
 
-    let identity = Identity::load_or_create()?;
     if flag("--system-agent") {
+        // The key is made by the user's program. This process only waits for it.
+        let identity = loop {
+            match Identity::load_existing() {
+                Ok(identity) => break identity,
+                Err(_) => std::thread::sleep(std::time::Duration::from_secs(5)),
+            }
+        };
         return secure_agent::run(identity);
     }
+    let identity = Identity::load_or_create()?;
     if crate::util::test_env("TLS_DATA_DIR").is_some() {
         match args.first().map(String::as_str) {
             Some("--dev-create-team") => return devtest::create_team(&identity, &args[1], &args[2]),

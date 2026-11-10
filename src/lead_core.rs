@@ -134,10 +134,19 @@ pub static MIC_LATCHED: AtomicBool = AtomicBool::new(false);
 pub static MIC_BUTTON: AtomicBool = AtomicBool::new(false);
 static VOICE_SENT_LOGGED: AtomicBool = AtomicBool::new(false);
 
+const MAX_TILE_SIDE: usize = 4096;
+const MAX_TILES: usize = 20_000;
+
+/// The size comes from the other PC, so it cannot be trusted to fit in memory.
+pub fn valid_screen(w: u32, h: u32) -> bool {
+    w > 0 && h > 0 && w <= 16_384 && h <= 16_384 && w as u64 * h as u64 <= 40_000_000
+}
+
 fn decode_jpeg(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
     use zune_jpeg::zune_core::colorspace::ColorSpace;
     use zune_jpeg::zune_core::options::DecoderOptions;
-    let options = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGBA);
+    // A tile is small. The limit stops a crafted image from asking for gigabytes of memory.
+    let options = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGBA).set_max_width(MAX_TILE_SIDE).set_max_height(MAX_TILE_SIDE);
     let mut d = zune_jpeg::JpegDecoder::new_with_options(data, options);
     let rgba = d.decode().ok()?;
     let info = d.info()?;
@@ -303,6 +312,9 @@ impl Node {
                 proto::FRAME_SIZE => {
                     let mut b = [0u8; 4];
                     s.read_exact(&mut b).await?;
+                    if !valid_screen(u16::from_le_bytes([b[0], b[1]]) as u32, u16::from_le_bytes([b[2], b[3]]) as u32) {
+                        anyhow::bail!("impossible screen size");
+                    }
                     if !thumb {
                         let (w, h) = (u16::from_le_bytes([b[0], b[1]]), u16::from_le_bytes([b[2], b[3]]));
                         let mut l = self.lead.lock();
@@ -328,7 +340,9 @@ impl Node {
                         v.thumb = Some((w, h, rgba));
                         v.thumb_rev += 1;
                     } else {
-                        v.screen.tiles.insert((x, y), Tile { w, h, rgba });
+                        if v.screen.tiles.len() < MAX_TILES || v.screen.tiles.contains_key(&(x, y)) {
+                            v.screen.tiles.insert((x, y), Tile { w, h, rgba });
+                        }
                     }
                     drop(l);
                     request_repaint(&self);
@@ -732,6 +746,20 @@ impl Node {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod screen_size_tests {
+    use super::valid_screen;
+
+    #[test]
+    fn only_real_screen_sizes_pass() {
+        assert!(valid_screen(1920, 1080));
+        assert!(valid_screen(7680, 4320));
+        assert!(!valid_screen(0, 1080));
+        assert!(!valid_screen(65535, 65535));
+        assert!(!valid_screen(16384, 16384));
     }
 }
 

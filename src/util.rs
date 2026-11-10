@@ -18,6 +18,26 @@ pub fn test_env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.is_empty())
 }
 
+/// Folder beside the installed program, where ordinary users cannot write.
+pub fn secure_dir() -> Option<PathBuf> {
+    if test_env("TLS_DATA_DIR").is_some() {
+        return Some(data_dir());
+    }
+    let exe = std::env::current_exe().ok()?;
+    Some(exe.parent()?.parent()?.join("TLSupporterData"))
+}
+
+/// The data folder is open to every user, so a process running as SYSTEM must not write there:
+/// a planted link would turn that write or delete against any file on the PC.
+fn log_path() -> Option<PathBuf> {
+    if !std::env::args().any(|a| a == "--service" || a == "--system-agent") {
+        return Some(data_dir().join("tlsupporter.log"));
+    }
+    let dir = secure_dir()?;
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir.join("system.log"))
+}
+
 /// Data folder. `TLS_DATA_DIR` lets two copies run side by side on one PC for testing.
 pub fn data_dir() -> PathBuf {
     let dir = match test_env("TLS_DATA_DIR") {
@@ -47,7 +67,7 @@ static LOG: OnceLock<Mutex<Option<std::fs::File>>> = OnceLock::new();
 
 pub fn log_line(text: &str) {
     let slot = LOG.get_or_init(|| {
-        let path = data_dir().join("tlsupporter.log");
+        let Some(path) = log_path() else { return Mutex::new(None) };
         // Keep the log small: start over once it passes 2 MB.
         if std::fs::metadata(&path).map(|m| m.len() > 2_000_000).unwrap_or(false) {
             let _ = std::fs::remove_file(&path);

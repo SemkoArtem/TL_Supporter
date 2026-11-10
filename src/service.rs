@@ -225,7 +225,6 @@ fn apply_update(exe: &str) -> bool {
         let _ = std::fs::rename(&old, exe);
         return false;
     }
-    let _ = std::fs::remove_file(crate::update::update_dir().join("new.exe"));
     crate::logi!("update installed");
     true
 }

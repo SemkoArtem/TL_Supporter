@@ -1063,7 +1063,7 @@ impl LeadApp {
         // The tiles are taken out so that the network and sound are not kept waiting for them.
         let tiles = std::mem::take(&mut t.screen.tiles);
         drop(l);
-        if w == 0 || h == 0 {
+        if w == 0 || h == 0 || w.max(h) > ctx.input(|i| i.max_texture_side) {
             self.textures.remove(id);
             return;
         }
@@ -1673,6 +1673,7 @@ impl LeadApp {
                         self.draft.new_admin_pw.clear();
                         self.node.update_directory(|d, me| {
                             d.policy.admin_password = h;
+                            d.sign_admin_password();
                             d.policy.rev = Rev::new(me);
                         });
                         self.node.audit_log("—", "Змінено адмінський пароль");

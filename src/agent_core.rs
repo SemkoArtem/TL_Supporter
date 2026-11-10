@@ -449,7 +449,12 @@ impl Node {
             }
             if !a.voice_logged { a.voice_logged = true; crate::logi!("first voice packet from lead"); }
             a.player.as_ref().unwrap().push(sender as u64, 0.0, audio::voice_gain(), opus, seq);
-            a.links.values().filter(|l| l.peer.id != peer.id && l.mode.listen).map(|l| l.peer.conn.clone()).collect()
+            // Only leads who were allowed in and may listen hear the other lead.
+            a.links
+                .values()
+                .filter(|l| l.peer.id != peer.id && l.mode.listen && !self.waits_for_consent(&l.peer.id) && self.rights_of(&l.peer.id).is_some_and(|r| r.listen))
+                .map(|l| l.peer.conn.clone())
+                .collect()
         };
         // Other leads on this employee hear the hint too, so they do not talk over each other.
         for c in relay {

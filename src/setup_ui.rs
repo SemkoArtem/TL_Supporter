@@ -20,7 +20,7 @@ pub const EXIT_TITLE: &str = "Close TL Supporter";
 pub fn exit_request_valid(request: &[u8]) -> bool {
     let Ok(plain) = secure::dpapi_unprotect_user(request) else { return false };
     let Ok(password) = String::from_utf8(plain) else { return false };
-    !password.is_empty() && secure::check_password(&model::load_state().directory.policy.admin_password, &password)
+    model::admin_password_ok(&model::load_state(), &password)
 }
 
 /// Ask the running program to close.
@@ -335,7 +335,7 @@ impl eframe::App for Settings {
 }
 
 fn secure_check(st: &LocalState, password: &str) -> bool {
-    secure::check_password(&st.directory.policy.admin_password, password)
+    model::admin_password_ok(st, password)
 }
 
 struct ExitPrompt {

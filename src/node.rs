@@ -383,14 +383,37 @@ impl Node {
             ts: now_ms(),
             lead: self.my_name(),
             target: target.to_string(),
-            action: action.to_string(),
+            action: action.chars().take(500).collect(),
         };
         {
-            self.audit.lock().push(entry.clone());
+            {
+                let mut log = self.audit.lock();
+                log.push(entry.clone());
+                model::trim_journal(&mut log);
+            }
             self.audit_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
         }
         for p in self.peers.lock().values().filter(|p| p.is_lead) {
             p.send(Msg::LogSync(vec![entry.clone()]));
+        }
+    }
+
+    fn is_approved_lead_peer(&self, id: &str) -> bool {
+        self.state.read().directory.is_approved_lead(id)
+    }
+
+    /// Signs the admin password if no lead has done it yet, as in teams from older versions.
+    pub fn ensure_admin_signature(self: &Arc<Self>) {
+        let needed = {
+            let st = self.state.read();
+            let d = &st.directory;
+            d.is_approved_lead(&self.identity.id) && !d.authority_private_b64.is_empty() && !d.admin_password_signed_by(&d.authority_public_b64)
+        };
+        if needed {
+            self.update_directory(|d, me| {
+                d.sign_admin_password();
+                d.policy.rev = Rev::new(me);
+            });
         }
     }
 
@@ -524,7 +547,6 @@ impl Node {
         if hello.id != secure::device_id(public) {
             bail!("peer id does not match its key");
         }
-        let mut added_lead = false;
         let is_lead = {
             let st = self.state.read();
             if hello.team_id != st.directory.team_id {
@@ -538,10 +560,9 @@ impl Node {
                         && secure::unb64(&hello.lead_proof_b64)
                             .map(|p| st.directory.check_lead_proof(public, &p))
                             .unwrap_or(false);
-                    if proven {
-                        // A PC known here as an employee's is treated as a lead only on this
-                        // connection. The newer data then tells it, or us, what its role is.
-                        added_lead = !other.is_some_and(|m| m.role == Role::Agent && m.state == MemberState::Approved);
+                    // A proof alone never makes anyone a lead, because whoever got hold of the team
+                    // key could write one. It only lets a known PC receive its newer role.
+                    if proven && other.is_some() {
                         true
                     } else if other.is_none() && outgoing {
                         bail!("unknown peer");
@@ -553,26 +574,6 @@ impl Node {
         };
         if !outgoing && !is_lead {
             bail!("only leads may open connections");
-        }
-        if added_lead {
-            let (id, public_b64, name) = (hello.id.clone(), secure::b64(public), hello.name.clone());
-            self.update_directory(|d, me| {
-                let keep = d.members.get(&id).cloned().unwrap_or_default();
-                d.members.insert(
-                    id.clone(),
-                    Member {
-                        id: id.clone(),
-                        public_b64,
-                        name: if keep.name.is_empty() { name } else { keep.name },
-                        role: Role::Lead,
-                        state: MemberState::Approved,
-                        group: keep.group,
-                        rights: keep.rights,
-                        lead_groups: keep.lead_groups,
-                        rev: Rev::new(me),
-                    },
-                );
-            });
         }
         Ok(is_lead)
     }
@@ -678,7 +679,9 @@ impl Node {
         match m {
             Msg::Hello(_) => {}
             Msg::DirSync(d) => {
-                if !peer.is_lead {
+                // Asked from the team data each time: a PC let in only to learn its new role
+                // or one that has just lost its role must not change anything here.
+                if !peer.is_lead || !self.is_approved_lead_peer(&peer.id) {
                     return;
                 }
                 let changed = self.state.write().directory.merge(&d);
@@ -690,7 +693,7 @@ impl Node {
                 }
             }
             Msg::LogSync(entries) => {
-                if !peer.is_lead || !self.is_lead() {
+                if !peer.is_lead || !self.is_lead() || !self.is_approved_lead_peer(&peer.id) {
                     return;
                 }
                 if model::merge_audit(&mut self.audit.lock(), &entries) {
@@ -825,26 +828,9 @@ impl Node {
                 if secure::device_id(&public) != id {
                     return;
                 }
-                let known = self.state.read().directory.member(&id).is_some();
-                if !known {
-                    let proven = secure::unb64(&proof_b64)
-                        .map(|p| self.state.read().directory.check_lead_proof(&public, &p))
-                        .unwrap_or(false);
-                    let (nid, pb) = (id.clone(), public_b64.clone());
-                    self.update_directory(|d, me| {
-                        d.members.insert(
-                            nid.clone(),
-                            Member {
-                                id: nid.clone(),
-                                public_b64: pb,
-                                name: if name.is_empty() { nid.clone() } else { name },
-                                role: if proven { Role::Lead } else { Role::Agent },
-                                state: if proven { MemberState::Approved } else { MemberState::Pending },
-                                rev: Rev::new(me),
-                                ..Default::default()
-                            },
-                        );
-                    });
+                // New PCs join with a code. Answering a probe never adds anyone to the team.
+                if self.state.read().directory.member(&id).is_none() {
+                    return;
                 }
                 let addr = SocketAddr::new(src.ip(), port);
                 self.seen.lock().insert(id.clone(), Seen { addr, last_ms: now_ms() });
