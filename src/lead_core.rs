@@ -170,7 +170,16 @@ impl Node {
             Msg::Status { locked } => l.targets.entry(peer.id.clone()).or_default().locked = locked,
             Msg::Activity(a) => l.targets.entry(peer.id.clone()).or_default().activity = a,
             Msg::Cursor { monitor, x, y } => l.targets.entry(peer.id.clone()).or_default().cursor = Some((monitor, x, y)),
-            Msg::ControlState { holder } => l.targets.entry(peer.id.clone()).or_default().control_holder = holder,
+            Msg::ControlState { holder } => {
+                let t = l.targets.entry(peer.id.clone()).or_default();
+                let gained = holder == self.identity.id && t.control_holder != holder;
+                t.control_holder = holder;
+                if gained {
+                    // Text copied before control started has to reach the employee too.
+                    l.clip_seq = 0;
+                    l.clip_applied = None;
+                }
+            }
             Msg::Draw { from, op } => {
                 let t = l.targets.entry(peer.id.clone()).or_default();
                 apply_draw(t, &from, color_for(&from), op);
@@ -437,6 +446,14 @@ impl Node {
         }
         if let Some(p) = self.peer(target) {
             p.send(Msg::Draw { from: me, op });
+        }
+    }
+
+    pub fn lead_send_clipboard(&self, target: &str, text: String) {
+        if text.len() < 1 << 20 {
+            if let Some(p) = self.peer(target) {
+                p.send(Msg::Clipboard(text));
+            }
         }
     }
 

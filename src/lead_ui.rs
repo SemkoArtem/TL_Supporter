@@ -1404,6 +1404,11 @@ impl LeadApp {
         }
     }
 
+    fn press_key(&self, id: &str, vk: u16) {
+        self.node.lead_input(id, InputEv::Key { vk, down: true });
+        self.node.lead_input(id, InputEv::Key { vk, down: false });
+    }
+
     fn forward_input(&mut self, ui: &egui::Ui, id: &str, image: Rect, r: &egui::Response) {
         let events = ui.input(|i| i.events.clone());
         let hovered = r.hovered() || r.dragged();
@@ -1434,6 +1439,14 @@ impl LeadApp {
                 }
                 egui::Event::MouseWheel { delta, .. } if hovered => {
                     self.node.lead_input(id, InputEv::Wheel { dy: delta.y.signum() });
+                }
+                // The interface library turns these shortcuts into events of its own,
+                // so the keys have to be pressed on the employee's PC by hand.
+                egui::Event::Copy => self.press_key(id, 0x43),
+                egui::Event::Cut => self.press_key(id, 0x58),
+                egui::Event::Paste(text) => {
+                    self.node.lead_send_clipboard(id, text);
+                    self.press_key(id, 0x56);
                 }
                 egui::Event::Text(t) => {
                     for c in t.chars() {

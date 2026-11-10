@@ -55,7 +55,7 @@ drawing and control over full-screen mstsc, publishing an update.
 You need a Windows account with administrator rights. Run every command below in PowerShell opened as administrator
 (Start → type `PowerShell` → Run as administrator).
 
-**Quick way.** Download [install.ps1](install.ps1) and run `powershell -ExecutionPolicy Bypass -File .\install.ps1`. It creates the folder, adds the Defender exclusions, downloads the program and starts it. The repository is private, so it asks for a GitHub token with read access to this repository. The token is not stored. The steps below do the same by hand.
+**Quick way.** Download [install.ps1](install.ps1) and run `powershell -ExecutionPolicy Bypass -File .\install.ps1`. It creates the folder, adds the Defender exclusions, downloads the program and installs it so that it starts with Windows. The repository is private, so it asks for a GitHub token with read access to this repository. The token is not stored. The steps below do the same by hand.
 
 **1. Add the program to the Windows Defender exclusions.** Do this on every PC before the file gets there.
 The program controls a computer remotely and has no publisher signature yet, so Defender may quarantine it as a trojan.
@@ -210,7 +210,7 @@ The "client hears" mode needs a signed virtual microphone driver. Its button in 
 Потрібен обліковий запис Windows із правами адміністратора. Усі команди нижче виконуй у PowerShell, відкритому від імені адміністратора
 (Пуск → введи `PowerShell` → Запуск від імені адміністратора).
 
-**Швидкий спосіб.** Завантаж [install.ps1](install.ps1) і виконай `powershell -ExecutionPolicy Bypass -File .\install.ps1`. Скрипт створить папку, додасть виключення Defender, завантажить програму і запустить її. Репозиторій закритий, тому він попросить токен GitHub із правом читання цього репозиторію. Токен ніде не зберігається. Кроки нижче роблять те саме вручну.
+**Швидкий спосіб.** Завантаж [install.ps1](install.ps1) і виконай `powershell -ExecutionPolicy Bypass -File .\install.ps1`. Скрипт створить папку, додасть виключення Defender, завантажить програму і встановить її в автозавантаження Windows. Репозиторій закритий, тому він попросить токен GitHub із правом читання цього репозиторію. Токен ніде не зберігається. Кроки нижче роблять те саме вручну.
 
 **1. Додай програму у виключення Windows Defender.** Зроби це на кожному ПК ще до того, як файл туди потрапить.
 Програма дистанційно керує комп'ютером і поки не має підпису видавця, тому Defender може покласти її в карантин як троян.
