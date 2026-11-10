@@ -61,23 +61,45 @@ static VOICE_GAIN: AtomicU32 = AtomicU32::new(0x3F80_0000);
 
 const VOICE_CFG: &str = "voice.cfg";
 
-/// Volume from 0 to 1 and whether the employee has muted the lead's voice.
-pub fn load_voice_cfg() -> (f32, bool) {
-    let text = std::fs::read_to_string(crate::util::data_dir().join(VOICE_CFG)).unwrap_or_default();
-    let mut parts = text.split_whitespace();
-    let volume = parts.next().and_then(|v| v.parse::<f32>().ok()).unwrap_or(1.0).clamp(0.0, 1.0);
-    (volume, parts.next() == Some("1"))
+const CONNECT_CFG: &str = "connect_sound.cfg";
+/// The employee can make the lead quieter, but must always be able to hear them.
+pub const MIN_VOICE_VOLUME: f32 = 0.25;
+static MIC_GAIN: AtomicU32 = AtomicU32::new(0x3F80_0000);
+
+fn read_volume(file: &str, min: f32) -> f32 {
+    std::fs::read_to_string(crate::util::data_dir().join(file))
+        .ok()
+        .and_then(|t| t.split_whitespace().next().and_then(|v| v.parse::<f32>().ok()))
+        .unwrap_or(1.0)
+        .clamp(min, 1.0)
 }
 
-pub fn save_voice_cfg(volume: f32, muted: bool) {
-    let _ = std::fs::write(crate::util::data_dir().join(VOICE_CFG), format!("{volume:.2} {}", u8::from(muted)));
+pub fn load_voice_volume() -> f32 {
+    read_volume(VOICE_CFG, MIN_VOICE_VOLUME)
+}
+
+pub fn save_voice_volume(volume: f32) {
+    let _ = std::fs::write(crate::util::data_dir().join(VOICE_CFG), format!("{:.2}", volume.clamp(MIN_VOICE_VOLUME, 1.0)));
     apply_voice_cfg();
+}
+
+/// Volume of the sound played when a lead connects. Zero turns it off.
+pub fn connect_volume() -> f32 {
+    read_volume(CONNECT_CFG, 0.0)
+}
+
+pub fn save_connect_volume(volume: f32) {
+    let _ = std::fs::write(crate::util::data_dir().join(CONNECT_CFG), format!("{:.2}", volume.clamp(0.0, 1.0)));
 }
 
 /// Picks up a change made in the separate settings window.
 pub fn apply_voice_cfg() {
-    let (volume, muted) = load_voice_cfg();
-    VOICE_GAIN.store((if muted { 0.0 } else { volume }).to_bits(), Ordering::Relaxed);
+    VOICE_GAIN.store(load_voice_volume().to_bits(), Ordering::Relaxed);
+}
+
+/// How much this lead's own microphone is amplified.
+pub fn set_mic_gain(gain: f32) {
+    MIC_GAIN.store(gain.clamp(0.1, 3.0).to_bits(), Ordering::Relaxed);
 }
 
 pub fn voice_gain() -> f32 {
@@ -343,7 +365,15 @@ fn capture_once(kind: CaptureKind, stop: &AtomicBool, on_packet: &mut impl FnMut
                     capture.ReleaseBuffer(frames)?;
                 }
                 while pending.len() >= FRAME_SAMPLES {
-                    let frame: Vec<i16> = pending.drain(..FRAME_SAMPLES).collect();
+                    let mut frame: Vec<i16> = pending.drain(..FRAME_SAMPLES).collect();
+                    if kind == CaptureKind::Microphone {
+                        let gain = f32::from_bits(MIC_GAIN.load(Ordering::Relaxed));
+                        if gain != 1.0 {
+                            for s in frame.iter_mut() {
+                                *s = (*s as f32 * gain).clamp(-32768.0, 32767.0) as i16;
+                            }
+                        }
+                    }
                     let peak = frame.iter().map(|s| s.unsigned_abs() as u32).max().unwrap_or(0);
                     if kind == CaptureKind::Microphone {
                         MIC_LEVEL.store(peak, Ordering::Relaxed);

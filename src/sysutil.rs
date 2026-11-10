@@ -4,7 +4,7 @@ use crate::proto::InputEv;
 use crate::util::wide;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::*;
-use windows::Win32::Media::Audio::{PlaySoundW, SND_ALIAS, SND_ASYNC, SND_NODEFAULT};
+use windows::Win32::Media::Audio::{PlaySoundW, SND_ASYNC, SND_MEMORY, SND_NODEFAULT};
 use windows::Win32::System::DataExchange::*;
 use windows::Win32::System::Memory::*;
 use windows::Win32::System::Ole::CF_UNICODETEXT;
@@ -78,10 +78,51 @@ pub fn idle_ms() -> u64 {
     }
 }
 
-pub fn play_connect_sound() {
-    let name = wide("SystemNotification");
+/// Windows reads the sound from memory while it plays, so the buffer must stay alive.
+static CHIME: parking_lot::Mutex<Vec<u8>> = parking_lot::const_mutex(Vec::new());
+
+/// Two short notes as a WAV file in memory, so that the volume can be chosen.
+fn chime_wav(volume: f32) -> Vec<u8> {
+    const RATE: u32 = 22_050;
+    let mut samples: Vec<i16> = Vec::new();
+    for (freq, ms) in [(660.0f32, 110u32), (880.0, 150)] {
+        let count = RATE * ms / 1000;
+        for i in 0..count {
+            let t = i as f32 / RATE as f32;
+            let fade = 1.0 - i as f32 / count as f32;
+            samples.push(((t * freq * std::f32::consts::TAU).sin() * fade * volume * 0.35 * 32767.0) as i16);
+        }
+    }
+    let bytes = samples.len() as u32 * 2;
+    let mut wav = Vec::with_capacity(44 + bytes as usize);
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + bytes).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&RATE.to_le_bytes());
+    wav.extend_from_slice(&(RATE * 2).to_le_bytes());
+    wav.extend_from_slice(&2u16.to_le_bytes());
+    wav.extend_from_slice(&16u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&bytes.to_le_bytes());
+    for s in samples {
+        wav.extend_from_slice(&s.to_le_bytes());
+    }
+    wav
+}
+
+pub fn play_connect_sound(volume: f32) {
+    if volume <= 0.01 {
+        return;
+    }
+    let mut buffer = CHIME.lock();
     unsafe {
-        let _ = PlaySoundW(PCWSTR(name.as_ptr()), None, SND_ALIAS | SND_ASYNC | SND_NODEFAULT);
+        // Stops anything still playing from the old buffer.
+        let _ = PlaySoundW(PCWSTR::null(), None, SND_ASYNC);
+        *buffer = chime_wav(volume);
+        let _ = PlaySoundW(PCWSTR(buffer.as_ptr() as *const u16), None, SND_MEMORY | SND_ASYNC | SND_NODEFAULT);
     }
 }
 

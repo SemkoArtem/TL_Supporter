@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tiny_skia::{Color, FillRule, LineCap, LineJoin, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
+use tiny_skia::{BlendMode, Color, FillRule, LineCap, LineJoin, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
@@ -45,6 +45,7 @@ pub enum UiCmd {
     LeadsOnline(usize),
     WindowsLocked(bool),
     Policy(Policy),
+    Quiet(bool),
 }
 
 #[derive(Clone)]
@@ -260,6 +261,7 @@ const TAP_LIFE: Duration = Duration::from_millis(700);
 const POINTER_LIFE: Duration = Duration::from_secs(2);
 const HINT_SLIDE: Duration = Duration::from_millis(350);
 const HISTORY_ROWS: usize = 6;
+const HELP_WAIT: Duration = Duration::from_secs(60);
 
 thread_local! {
     static EVENTS: RefCell<Vec<Ev>> = const { RefCell::new(Vec::new()) };
@@ -372,9 +374,26 @@ fn icon_pixmap(rgb: [u8; 3]) -> Pixmap {
     pix
 }
 
+/// The crescent shown in the tray while "Do not disturb" is on.
+fn moon_pixmap() -> Pixmap {
+    let mut pix = Pixmap::new(32, 32).unwrap();
+    let mut paint = Paint::default();
+    paint.anti_alias = true;
+    paint.set_color_rgba8(255, 200, 60, 255);
+    let disc = PathBuilder::from_circle(15.0, 17.0, 13.0).unwrap();
+    pix.fill_path(&disc, &paint, FillRule::Winding, Transform::identity(), None);
+    paint.blend_mode = BlendMode::Clear;
+    let bite = PathBuilder::from_circle(22.0, 11.0, 11.0).unwrap();
+    pix.fill_path(&bite, &paint, FillRule::Winding, Transform::identity(), None);
+    pix
+}
+
 fn tray_icon(rgb: [u8; 3]) -> HICON {
+    icon_handle(icon_pixmap(rgb))
+}
+
+fn icon_handle(pix: Pixmap) -> HICON {
     const S: u32 = 32;
-    let pix = icon_pixmap(rgb);
     let mut bgra = pix.data().to_vec();
     for c in bgra.chunks_exact_mut(4) {
         c.swap(0, 2);
@@ -503,6 +522,7 @@ struct Ui {
     tray_hwnd: HWND,
     tray_data: NOTIFYICONDATAW,
     tray_color: [u8; 3],
+    quiet: bool,
     panel_hwnd: HWND,
     panel_dib: Option<Dib>,
     panel_visible: bool,
@@ -526,6 +546,7 @@ struct Ui {
     font: Option<Font>,
     help_menu: bool,
     help_waiting: bool,
+    help_since: Option<Instant>,
     status: Option<(String, Instant)>,
     hidden_until: Option<Instant>,
     active: bool,
@@ -544,11 +565,13 @@ impl Ui {
         } else {
             [122, 117, 116]
         };
-        if color == self.tray_color {
+        // A colour no state uses stands for the crescent.
+        let key = if self.quiet { [1, 2, 3] } else { color };
+        if key == self.tray_color {
             return;
         }
-        self.tray_color = color;
-        self.tray_data.hIcon = tray_icon(color);
+        self.tray_color = key;
+        self.tray_data.hIcon = if self.quiet { icon_handle(moon_pixmap()) } else { tray_icon(color) };
         self.tray_data.uFlags = NIF_ICON;
         unsafe {
             let _ = Shell_NotifyIconW(NIM_MODIFY, &self.tray_data);
@@ -577,6 +600,7 @@ impl Ui {
             UiCmd::ClearLead(id) => {
                 self.items.retain(|i| i.lead != id);
                 self.pointers.retain(|p| p.lead != id);
+                self.activity.retain(|a| a.id != id);
                 self.consent.retain(|c| c.0 != id);
                 // The conversation stays readable after the lead has left.
                 for h in self.hints.iter_mut().filter(|h| h.lead == id) {
@@ -618,6 +642,7 @@ impl Ui {
             }
             UiCmd::HelpSent => {
                 self.help_waiting = true;
+                self.help_since = Some(Instant::now());
                 self.status = Some(("Запит надіслано".into(), Instant::now()));
                 self.panel_dirty = true;
             }
@@ -629,12 +654,20 @@ impl Ui {
                 self.balloon("Потрібна допомога", &name);
                 flash_console_window();
             }
+            UiCmd::Quiet(on) => {
+                self.quiet = on;
+                self.update_tray();
+            }
             UiCmd::Active(a) => {
                 self.active = a;
                 self.update_tray();
             }
             UiCmd::LeadsOnline(n) => {
                 self.leads_online = n;
+                if n == 0 {
+                    self.help_waiting = false;
+                    self.panel_dirty = true;
+                }
                 self.update_tray();
             }
             UiCmd::WindowsLocked(locked) => {
@@ -956,7 +989,7 @@ impl Ui {
             y += 32.0;
         }
         if self.help_menu {
-            let mut labels: Vec<(String, String)> = vec![("Без причини".to_string(), String::new())];
+            let mut labels: Vec<(String, String)> = vec![("Допоможіть".to_string(), String::new())];
             labels.extend(self.policy.help_reasons.iter().map(|r| (r.clone(), r.clone())));
             for (label, reason) in labels {
                 fill(&mut pix, &mut paint, Rect::from_xywh(0.0, y, PANEL_W as f32, 30.0).unwrap(), [31, 31, 31, 245]);
@@ -1095,6 +1128,12 @@ impl Ui {
             }
             changed = true;
         }
+        // Nobody took the request: for the leads it is now a missed one.
+        if self.help_waiting && self.help_since.is_some_and(|t| now.duration_since(t) >= HELP_WAIT) {
+            self.help_waiting = false;
+            self.status = Some(("Запит пропущено".into(), now));
+            changed = true;
+        }
         let down = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } < 0;
         if down && !self.lbutton_was && !over && (self.history_open || self.help_menu) {
             self.history_open = false;
@@ -1132,10 +1171,6 @@ impl Ui {
                 let _ = AppendMenuW(menu, MF_STRING, 2, w!("Потрібна допомога"));
             }
             let _ = AppendMenuW(menu, MF_STRING, 3, w!("Налаштування…"));
-            if !self.is_lead_pc {
-                let muted = crate::audio::load_voice_cfg().1;
-                let _ = AppendMenuW(menu, MF_STRING, 6, if muted { w!("Увімкнути звук керівника") } else { w!("Вимкнути звук керівника") });
-            }
             let _ = AppendMenuW(menu, MF_STRING, 5, w!("Перезапустити"));
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
             let _ = AppendMenuW(menu, MF_STRING, 4, w!("Закрити програму…"));
@@ -1151,10 +1186,6 @@ impl Ui {
                 2 => self.node.agent_request_help(String::new()),
                 3 => open_settings_process(),
                 4 => open_exit_prompt(),
-                6 => {
-                    let (volume, muted) = crate::audio::load_voice_cfg();
-                    crate::audio::save_voice_cfg(volume, !muted);
-                }
                 5 => {
                     let _ = Shell_NotifyIconW(NIM_DELETE, &self.tray_data);
                     crate::service::restart_program();
@@ -1386,12 +1417,14 @@ pub fn run(node: Arc<Node>, rx: Receiver<UiCmd>, handle: UiHandle, is_lead_pc: b
         let _ = RegisterHotKey(None, HOTKEY_HIDE, MOD_CONTROL | MOD_ALT, 'H' as u32);
         let panel_hwnd = create_layered(w!("TLSPanel"), 0, 0, PANEL_W, 40, false);
         let policy = node.state.read().directory.policy.clone();
+        let quiet = node.state.read().lead.do_not_disturb && is_lead_pc;
         let mut ui = Ui {
             node,
             is_lead_pc,
             tray_hwnd,
             tray_data: data,
             tray_color: color,
+            quiet,
             panel_hwnd,
             panel_dib: None,
             panel_visible: false,
@@ -1414,12 +1447,14 @@ pub fn run(node: Arc<Node>, rx: Receiver<UiCmd>, handle: UiHandle, is_lead_pc: b
             font: Font::load(),
             help_menu: false,
             help_waiting: false,
+            help_since: None,
             status: None,
             hidden_until: None,
             active: false,
             leads_online: 0,
             timer_on: false,
         };
+        ui.update_tray();
         ui.render_panel();
         // A slow tick keeps the panel honest even when nothing else happens.
         SetTimer(tray_hwnd, 2, 1000, None);

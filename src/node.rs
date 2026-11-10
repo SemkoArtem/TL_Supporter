@@ -894,6 +894,7 @@ pub fn start(identity: Identity, state: LocalState, ui: crate::agent_ui::UiHandl
     let handle = runtime.handle().clone();
     let cfg = NetConfig::from_env();
     crate::audio::set_devices(&state.lead.mic_device, &state.lead.speaker_device);
+    crate::audio::set_mic_gain(state.lead.mic_gain);
     let is_lead = state.directory.is_approved_lead(&identity.id);
     let node = handle.block_on(async {
         let endpoint = net::create_endpoint(&identity, cfg.quic_port)?;

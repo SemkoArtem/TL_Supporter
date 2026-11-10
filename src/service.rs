@@ -1,8 +1,6 @@
 //! Windows service and installer. The service keeps the program running in the user's session,
 //! restarts it if it is closed and applies verified updates.
 
-use crate::model;
-use crate::secure::Identity;
 use crate::util::{data_dir, wide};
 use anyhow::{bail, Context, Result};
 use std::ffi::OsString;
@@ -30,7 +28,38 @@ pub const EXIT_STOPPED: u32 = 77;
 pub const EXIT_BUSY: u32 = 78;
 /// A program that ended this quickly did not really start, so the service waits before retrying.
 const QUICK_EXIT: Duration = Duration::from_secs(5);
-const RETRY_DELAY: Duration = Duration::from_secs(10);
+
+/// The more often a start fails, the longer the service waits, up to five minutes.
+fn retry_delay(failures: u32) -> Duration {
+    Duration::from_secs((2u64 << failures.min(8)).min(300))
+}
+
+/// Close every other running copy of this program. A copy left over from an earlier launch
+/// would keep its old windows on screen and make the service try again and again.
+fn kill_other_copies(keep: &[u32]) {
+    use windows::Win32::System::Diagnostics::ToolHelp::*;
+    unsafe {
+        let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else { return };
+        let me = GetCurrentProcessId();
+        let mut entry = PROCESSENTRY32W { dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
+        let mut more = Process32FirstW(snapshot, &mut entry).is_ok();
+        while more {
+            let len = entry.szExeFile.iter().position(|c| *c == 0).unwrap_or(entry.szExeFile.len());
+            let name = String::from_utf16_lossy(&entry.szExeFile[..len]);
+            let pid = entry.th32ProcessID;
+            if name.eq_ignore_ascii_case("TLSupporter.exe") && pid != me && !keep.contains(&pid) {
+                if let Ok(process) = OpenProcess(PROCESS_TERMINATE, false, pid) {
+                    if TerminateProcess(process, 1).is_ok() {
+                        crate::logi!("closed a leftover copy of the program, pid {pid}");
+                    }
+                    let _ = CloseHandle(process);
+                }
+            }
+            more = Process32NextW(snapshot, &mut entry).is_ok();
+        }
+        let _ = CloseHandle(snapshot);
+    }
+}
 
 define_windows_service!(ffi_service_main, service_main);
 
@@ -59,6 +88,7 @@ fn status(state: ServiceState, accept: ServiceControlAccept, code: u32) -> Servi
 
 struct Child {
     process: HANDLE,
+    pid: u32,
     session: u32,
     started: Instant,
 }
@@ -104,7 +134,7 @@ fn start_in_session(session: u32, exe: &str) -> Result<Child> {
         let _ = CloseHandle(token);
         result?;
         let _ = CloseHandle(info.hThread);
-        Ok(Child { process: info.hProcess, session, started: Instant::now() })
+        Ok(Child { process: info.hProcess, pid: info.dwProcessId, session, started: Instant::now() })
     }
 }
 
@@ -144,7 +174,7 @@ fn start_system_agent(session: u32, exe: &str) -> Result<Child> {
         let _ = CloseHandle(token);
         result?;
         let _ = CloseHandle(info.hThread);
-        Ok(Child { process: info.hProcess, session, started: Instant::now() })
+        Ok(Child { process: info.hProcess, pid: info.dwProcessId, session, started: Instant::now() })
     }
 }
 
@@ -209,11 +239,13 @@ fn service_body() -> Result<()> {
 
     let exe = std::env::current_exe()?.to_string_lossy().to_string();
     let _ = std::fs::remove_file(format!("{exe}.old"));
+    kill_other_copies(&[]);
     let mut child: Option<Child> = None;
     let mut system_child: Option<Child> = None;
     let mut stopped_in: Option<u32> = None;
     let mut child_retry = Instant::now();
     let mut system_retry = Instant::now();
+    let (mut child_failures, mut system_failures) = (0u32, 0u32);
     let mut last_update_check = Instant::now();
     let mut updated = false;
 
@@ -229,12 +261,26 @@ fn service_body() -> Result<()> {
         if let Some(ended) = check_child(&mut child, session) {
             if ended.code == EXIT_STOPPED {
                 stopped_in = Some(ended.session);
-            } else if ended.code == EXIT_BUSY || ended.quick {
-                child_retry = Instant::now() + RETRY_DELAY;
+            } else if ended.code == EXIT_BUSY {
+                // Something outside the service holds the program open, so it goes first.
+                let keep: Vec<u32> = system_child.iter().map(|c| c.pid).collect();
+                kill_other_copies(&keep);
+                child_failures += 1;
+                child_retry = Instant::now() + retry_delay(child_failures);
+            } else if ended.quick {
+                child_failures += 1;
+                child_retry = Instant::now() + retry_delay(child_failures);
+            } else {
+                child_failures = 0;
             }
         }
-        if check_child(&mut system_child, session).is_some_and(|e| e.quick) {
-            system_retry = Instant::now() + RETRY_DELAY;
+        if let Some(ended) = check_child(&mut system_child, session) {
+            if ended.quick {
+                system_failures += 1;
+                system_retry = Instant::now() + retry_delay(system_failures);
+            } else {
+                system_failures = 0;
+            }
         }
         if stopped_in.is_some() {
             // Closing the program on purpose also closes secure access.
@@ -311,10 +357,11 @@ fn run(cmd: &str, args: &[&str]) {
 }
 
 /// Copy the program, open the firewall for the local subnet only and register the service.
-pub fn install(preset: Option<(String, String)>) -> Result<()> {
+pub fn install() -> Result<()> {
     if !is_admin() {
         bail!("потрібні права адміністратора");
     }
+    kill_other_copies(&[]);
     let dir = install_dir();
     std::fs::create_dir_all(&dir)?;
     let target = dir.join("TLSupporter.exe");
@@ -324,11 +371,6 @@ pub fn install(preset: Option<(String, String)>) -> Result<()> {
     }
     let data = data_dir();
     run("icacls", &[&data.to_string_lossy(), "/grant", "*S-1-5-32-545:(OI)(CI)M", "/T", "/Q"]);
-    if let Some((path, password)) = preset {
-        let identity = Identity::load_or_create()?;
-        let state = crate::setup_ui::state_from_preset(&identity, std::path::Path::new(&path), &password, "")?;
-        model::save_state(&state)?;
-    }
     let exe = target.to_string_lossy().to_string();
     // Lets a service press Ctrl+Alt+Del on behalf of a lead with full access.
     run("reg", &["add", r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System", "/v", "SoftwareSASGeneration", "/t", "REG_DWORD", "/d", "1", "/f"]);
@@ -366,6 +408,7 @@ pub fn uninstall() -> Result<()> {
         std::thread::sleep(Duration::from_secs(2));
         service.delete()?;
     }
+    kill_other_copies(&[]);
     run("netsh", &["advfirewall", "firewall", "delete", "rule", "name=TLSupporter"]);
     let _ = std::fs::remove_dir_all(install_dir());
     Ok(())

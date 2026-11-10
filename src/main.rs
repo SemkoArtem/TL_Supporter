@@ -141,8 +141,7 @@ fn real_main() -> Result<()> {
         return service::uninstall();
     }
     if flag("--install") {
-        let preset = arg_value(&args, "--preset").map(|p| (p, arg_value(&args, "--preset-password").unwrap_or_default()));
-        return service::install(preset);
+        return service::install();
     }
 
     let identity = Identity::load_or_create()?;
@@ -152,8 +151,6 @@ fn real_main() -> Result<()> {
     if std::env::var("TLS_DATA_DIR").is_ok() {
         match args.first().map(String::as_str) {
             Some("--dev-create-team") => return devtest::create_team(&identity, &args[1], &args[2]),
-            Some("--dev-export-preset") => return devtest::export_preset(&args[1], &args[2], args.get(3).is_some()),
-            Some("--dev-import-preset") => return devtest::import_preset(&identity, &args[1], &args[2], &args[3]),
             Some("--dev-e2e") => return devtest::run_e2e(identity, args[1].parse()?),
             Some("--dev-secure-e2e") => return devtest::run_secure_e2e(identity, &args[1]),
             Some("--dev-join") => return devtest::join(&identity, &args[1], &args[2]),

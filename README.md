@@ -26,7 +26,7 @@ The program is free of charge, a free license is planned for later.
 - Mouse and keyboard control that the lead turns on and off at will. Text in the clipboard is shared only while the lead controls the PC. The lead has a mixer for the employee's microphone and the computer sound, the employee can set the volume of the lead's voice or mute it.
 - Full access on the lock screen, the sign-in screen and administrator windows, as a separate right for each lead.
 - Lead rights, an action journal, console lock and auto-lock, an admin password on the employee's PC.
-- Adding a PC with a one-time code, presets for quick installation, settings backup.
+- Adding a PC with a one-time code.
 - Autostart as a Windows service, the employee sees only a tray icon.
 - The close and minimize buttons hide the program to the tray, with no taskbar button. The close button also ends the open sessions. It closes completely only from the tray menu or settings, with the team admin password.
 - A lead's PC can switch to employee mode and back with the team admin password.
@@ -85,12 +85,6 @@ Save it as `C:\TLSupporterSetup\TLSupporter.exe`, then allow it to run:
 
     Get-Service TLSupporter
     Get-Process TLSupporter
-
-#### Quick installation with a preset
-
-Create the file on a lead's PC in Налаштування (Settings) → Копія і пресет (Backup and preset) and copy it into `C:\TLSupporterSetup`. Do step 1 first, then:
-
-    Start-Process "C:\TLSupporterSetup\TLSupporter.exe" -ArgumentList '--install --preset "C:\TLSupporterSetup\agent.tlpreset" --preset-password PASSWORD' -Wait
 
 #### Installing a new version
 
@@ -185,7 +179,7 @@ The "client hears" mode needs a signed virtual microphone driver. Its button in 
 - Керування мишею і клавіатурою, яке керівник вмикає і вимикає сам. Текст у буфері обміну спільний лише під час керування. У керівника є мікшер мікрофона працівника і звуку системи, працівник може змінити гучність голосу керівника або вимкнути його.
 - Повний доступ на екрані блокування, екрані входу і у вікнах адміністратора, окреме право для кожного керівника.
 - Права керівників, журнал дій, блокування консолі й автоблокування, адмінський пароль на ПК працівника.
-- Додавання ПК за одноразовим кодом, пресети для швидкого встановлення, резервна копія налаштувань.
+- Додавання ПК за одноразовим кодом.
 - Автозапуск як служба Windows, у працівника лише значок у треї.
 - Хрестик і кнопка згортання ховають програму в трей, без кнопки на панелі задач. Хрестик ще й завершує відкриті сеанси. Повністю вона закривається лише через меню значка в треї або налаштування, з адмінським паролем команди.
 - ПК керівника можна перевести в режим працівника і повернути назад з адмінським паролем команди.
@@ -244,12 +238,6 @@ The "client hears" mode needs a signed virtual microphone driver. Its button in 
 
     Get-Service TLSupporter
     Get-Process TLSupporter
-
-#### Швидке встановлення з пресетом
-
-Створи файл на ПК керівника в розділі Налаштування → Копія і пресет і скопіюй його в `C:\TLSupporterSetup`. Спершу виконай крок 1, потім:
-
-    Start-Process "C:\TLSupporterSetup\TLSupporter.exe" -ArgumentList '--install --preset "C:\TLSupporterSetup\agent.tlpreset" --preset-password ПАРОЛЬ' -Wait
 
 #### Встановлення нової версії
 

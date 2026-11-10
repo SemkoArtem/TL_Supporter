@@ -43,7 +43,6 @@ enum Mode {
     Choose,
     Create,
     Join,
-    Preset,
 }
 
 struct Setup {
@@ -54,7 +53,6 @@ struct Setup {
     password: String,
     password2: String,
     code: String,
-    preset_password: String,
     error: String,
     done: std::sync::Arc<std::sync::atomic::AtomicBool>,
     own_code: String,
@@ -113,41 +111,6 @@ impl Setup {
         }
     }
 
-    fn preset(&mut self, ctx: &egui::Context) {
-        let Some(path) = rfd::FileDialog::new().add_filter("TL Supporter", &["tlpreset"]).pick_file() else { return };
-        match state_from_preset(&self.identity, &path, &self.preset_password, self.name.trim()) {
-            Ok(s) => self.finish(s, ctx),
-            Err(e) => self.error = format!("Не вдалося відкрити пресет: {e}"),
-        }
-    }
-}
-
-/// Build this PC's state from a preset file. Also used by silent installation.
-pub fn state_from_preset(identity: &Identity, path: &std::path::Path, password: &str, name: &str) -> anyhow::Result<LocalState> {
-    let bytes = std::fs::read(path)?;
-    let p = model::open_preset(password, &bytes)?;
-    let display = if name.is_empty() {
-        std::env::var("COMPUTERNAME").unwrap_or_else(|_| identity.id.clone())
-    } else {
-        name.to_string()
-    };
-    let mut directory = p.directory;
-    if p.role == Role::Lead {
-        // The preset carries the team authority, so this PC can present proof that it is a lead.
-        directory.members.insert(
-            identity.id.clone(),
-            model::Member {
-                id: identity.id.clone(),
-                public_b64: secure::b64(&identity.public),
-                name: display.clone(),
-                role: Role::Lead,
-                state: MemberState::Approved,
-                rev: model::Rev::new(&identity.id),
-                ..Default::default()
-            },
-        );
-    }
-    Ok(LocalState { display_name: display, directory, lead: p.lead.unwrap_or_default(), ..Default::default() })
 }
 
 impl eframe::App for Setup {
@@ -176,9 +139,6 @@ impl eframe::App for Setup {
                     ui.add_space(8.0);
                     if ui.button("Приєднатись за кодом від керівника").clicked() {
                         self.mode = Mode::Join;
-                    }
-                    if ui.button("Відкрити файл пресету").clicked() {
-                        self.mode = Mode::Preset;
                     }
                     ui.add_space(10.0);
                     if ui.button("Створити нову команду (я керівник)").clicked() {
@@ -209,19 +169,6 @@ impl eframe::App for Setup {
                     ui.horizontal(|ui| {
                         if ui.button("Приєднатись").clicked() {
                             self.join(ctx);
-                        }
-                        if ui.button("Назад").clicked() {
-                            self.mode = Mode::Choose;
-                        }
-                    });
-                }
-                Mode::Preset => {
-                    ui.label("Пароль файлу:");
-                    ui.add(egui::TextEdit::singleline(&mut self.preset_password).password(true).desired_width(f32::INFINITY));
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("Вибрати файл…").clicked() {
-                            self.preset(ctx);
                         }
                         if ui.button("Назад").clicked() {
                             self.mode = Mode::Choose;
@@ -261,7 +208,6 @@ pub fn run_setup(identity: Identity) -> bool {
                 password: String::new(),
                 password2: String::new(),
                 code: String::new(),
-                preset_password: String::new(),
                 error: String::new(),
                 done: flag,
                 own_code: code_for_ui,
@@ -278,7 +224,8 @@ struct Settings {
     id: String,
     key: theme::KeyView,
     confirm_reset: bool,
-    voice: (f32, bool),
+    voice: f32,
+    connect_sound: f32,
     password: String,
     unlocked: bool,
     error: String,
@@ -317,17 +264,22 @@ impl eframe::App for Settings {
                 ui.end_row();
             });
             ui.add_space(10.0);
-            ui.horizontal(|ui| {
+            egui::Grid::new("sound").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
                 ui.label("Голос керівника");
-                let (mut volume, mut muted) = self.voice;
-                let mut percent = volume * 100.0;
-                let moved = ui.add_enabled(!muted, egui::Slider::new(&mut percent, 0.0..=100.0).integer().suffix("%")).changed();
-                volume = percent / 100.0;
-                let flipped = ui.checkbox(&mut muted, "Вимкнути").changed();
-                if moved || flipped {
-                    self.voice = (volume, muted);
-                    crate::audio::save_voice_cfg(volume, muted);
+                let mut voice = self.voice * 100.0;
+                let low = crate::audio::MIN_VOICE_VOLUME * 100.0;
+                if ui.add(egui::Slider::new(&mut voice, low..=100.0).integer().suffix("%")).changed() {
+                    self.voice = voice / 100.0;
+                    crate::audio::save_voice_volume(self.voice);
                 }
+                ui.end_row();
+                ui.label("Звук підключення");
+                let mut chime = self.connect_sound * 100.0;
+                if ui.add(egui::Slider::new(&mut chime, 0.0..=100.0).integer().suffix("%")).on_hover_text("0% вимикає звук").changed() {
+                    self.connect_sound = chime / 100.0;
+                    crate::audio::save_connect_volume(self.connect_sound);
+                }
+                ui.end_row();
             });
             ui.add_space(10.0);
             ui.separator();
@@ -449,7 +401,7 @@ pub fn run_settings(identity: Identity) {
         options(SETTINGS_TITLE, 460.0, 460.0),
         Box::new(move |cc| {
             theme::apply(&cc.egui_ctx, model::load_state().lead.light_theme);
-            Ok(Box::new(Settings { id: identity.id, key: Default::default(), confirm_reset: false, voice: crate::audio::load_voice_cfg(), password: String::new(), unlocked: false, error: String::new(), message: String::new() }))
+            Ok(Box::new(Settings { id: identity.id, key: Default::default(), confirm_reset: false, voice: crate::audio::load_voice_volume(), connect_sound: crate::audio::connect_volume(), password: String::new(), unlocked: false, error: String::new(), message: String::new() }))
         }),
     );
 }

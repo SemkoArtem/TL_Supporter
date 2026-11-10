@@ -192,7 +192,7 @@ impl Node {
                 l.help.insert(0, HelpItem { target: peer.id.clone(), id, reason, ts: now_ms(), taken_by: String::new() });
                 l.help_alert = true;
                 drop(l);
-                sysutil::play_connect_sound();
+                sysutil::play_connect_sound(1.0);
                 self.ui.send(crate::agent_ui::UiCmd::HelpIncoming(self.member_name(&peer.id)));
                 self.restore_console();
                 request_repaint(self);

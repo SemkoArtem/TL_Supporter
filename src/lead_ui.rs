@@ -1,7 +1,7 @@
 //! Lead console: employee list or thumbnails, the live session view, journal and settings.
 
 use crate::lead_core::{self, stroke_expired, MIC_BUTTON, MIC_LATCHED, MIC_OPEN};
-use crate::model::{self, Backup, Group, MemberState, PhraseSet, Preset, Rev, Role};
+use crate::model::{self, Group, MemberState, PhraseSet, Rev, Role};
 use crate::node::Node;
 use crate::proto::{DrawOp, InputEv, Mode, ScreenLevel, Tool};
 use crate::secure;
@@ -28,7 +28,6 @@ enum SettingsTab {
     Drawing,
     Hints,
     Team,
-    Data,
 }
 
 const QUALITIES: [(u8, &str); 4] = [(0, "Максимальна"), (1, "Висока"), (2, "Середня"), (3, "Низька")];
@@ -71,8 +70,6 @@ struct SettingsDraft {
     join_code: Option<String>,
     join_role_lead: bool,
     join_group: String,
-    file_password: String,
-    preset_lead: bool,
     message: String,
     update_status: String,
     repo: String,
@@ -98,7 +95,6 @@ pub struct LeadApp {
     hints_open: bool,
     hint: String,
     control: bool,
-    mini: bool,
     last_move: Pos2,
     modifiers: egui::Modifiers,
     member_dialog: Option<MemberDialog>,
@@ -183,7 +179,6 @@ impl LeadApp {
             hints_open: false,
             hint: String::new(),
             control: false,
-            mini: false,
             last_move: Pos2::ZERO,
             modifiers: egui::Modifiers::NONE,
             member_dialog: None,
@@ -407,12 +402,10 @@ impl LeadApp {
                     if theme::nav_item(ui, icon::HISTORY, "Журнал", self.page == Page::Journal, expanded).clicked() {
                         go = Some(Page::Journal);
                     }
-                    if theme::nav_item(ui, icon::MINI, "Міні-панель", false, expanded).clicked() {
-                        self.set_mini(ctx, true);
-                    }
                     let quiet = self.node.state.read().lead.do_not_disturb;
                     if theme::nav_item(ui, icon::QUIET, if quiet { "Не турбувати: увімкнено" } else { "Не турбувати" }, quiet, expanded).clicked() {
                         self.save_lead(|l| l.do_not_disturb = !quiet);
+                        self.node.ui.send(crate::agent_ui::UiCmd::Quiet(!quiet));
                     }
                 });
                 if let Some(page) = go {
@@ -420,20 +413,6 @@ impl LeadApp {
                     self.nav_peek = false;
                 }
             });
-    }
-
-    fn set_mini(&mut self, ctx: &egui::Context, on: bool) {
-        self.mini = on;
-        let on_top = self.node.state.read().lead.mini_on_top;
-        if on {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
-            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(460.0, 190.0)));
-            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(if on_top { egui::WindowLevel::AlwaysOnTop } else { egui::WindowLevel::Normal }));
-        } else {
-            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::Normal));
-            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(980.0, 560.0)));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
-        }
     }
 
     fn mic_controls(&mut self, ui: &mut egui::Ui) {
@@ -458,6 +437,14 @@ impl LeadApp {
         let hold = ui.add(egui::Button::new(format!("{} Утримуй", icon::MIC)).sense(Sense::click_and_drag()));
         MIC_BUTTON.store(hold.is_pointer_button_down_on(), Ordering::Relaxed);
         ui.add(egui::ProgressBar::new(crate::audio::mic_level().min(1.0)).desired_width(70.0).rounding(0.0));
+        let mut gain = self.node.state.read().lead.mic_gain * 100.0;
+        ui.spacing_mut().slider_width = 80.0;
+        ui.label("Гучність");
+        if ui.add(egui::Slider::new(&mut gain, 20.0..=200.0).integer().suffix("%")).on_hover_text("Наскільки голосно тебе чує працівник").changed() {
+            let value = gain / 100.0;
+            crate::audio::set_mic_gain(value);
+            self.save_lead(|l| l.mic_gain = value);
+        }
         if crate::audio::mic_failed() {
             ui.colored_label(theme::danger(), "Мікрофон не відкрився").on_hover_text("Перевір пристрій у Налаштування → Звук");
         } else if latched && now_ms() - crate::audio::mic_last_sound() > 3000 {
@@ -477,22 +464,6 @@ impl LeadApp {
             out.insert(0, ("Мої".to_string(), st.lead.personal_phrases.clone()));
         }
         out
-    }
-
-    fn mini_view(&mut self, ctx: &egui::Context) {
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                let name = self.active.as_deref().map(|a| self.node.member_name(a)).unwrap_or_else(|| "Немає сеансу".into());
-                ui.strong(name);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Розгорнути").clicked() {
-                        self.set_mini(ctx, false);
-                    }
-                });
-            });
-            ui.horizontal_wrapped(|ui| self.mic_controls(ui));
-            ui.horizontal(|ui| self.hint_bar(ui));
-        });
     }
 
     fn hint_bar(&mut self, ui: &mut egui::Ui) {
@@ -828,9 +799,27 @@ impl LeadApp {
                         if r.clicked() && online {
                             self.open_session(id, Some(Mode { listen: true, screen: ScreenLevel::Full, monitor: 0, quality: 0 }));
                         }
+                        r.context_menu(|ui| self.member_menu(ui, id, &name));
                         ui.horizontal(|ui| {
                             self.status_dot(ui, id, false);
-                            ui.label(&name);
+                            ui.add(egui::Label::new(&name).truncate());
+                        });
+                        let reachable = self.node.is_reachable(id);
+                        ui.horizontal(|ui| {
+                            ui.add_enabled_ui(reachable, |ui| {
+                                if ui.add(theme::accent_button("Підключитись")).clicked() {
+                                    self.open_session(id, Some(Mode { listen: true, screen: ScreenLevel::Full, monitor: 0, quality: 0 }));
+                                }
+                                if ui.button(icon::HEADPHONE).on_hover_text("Лише слухати").clicked() {
+                                    self.open_session(id, Some(Mode { listen: true, screen: ScreenLevel::Off, monitor: 0, quality: 0 }));
+                                }
+                            });
+                            if ui.button(icon::MORE).on_hover_text("Ім'я, група, запити").clicked() {
+                                self.member_dialog = Some(self.dialog_for(id));
+                            }
+                            if self.node.lead.lock().help.iter().any(|h| h.target == id.as_str() && h.is_missed(now_ms())) {
+                                ui.colored_label(theme::danger(), icon::MISSED).on_hover_text("Пропущений запит допомоги");
+                            }
                         });
                     });
                 });
@@ -1348,7 +1337,6 @@ impl LeadApp {
                     (SettingsTab::Drawing, icon::PEN, "Малювання"),
                     (SettingsTab::Hints, icon::SEND, "Підказки"),
                     (SettingsTab::Team, icon::PEOPLE, "Команда"),
-                    (SettingsTab::Data, icon::COPY, "Дані"),
                 ] {
                     if theme::nav_item(ui, glyph, label, self.tab == t, true).clicked() {
                         self.tab = t;
@@ -1365,6 +1353,8 @@ impl LeadApp {
                         self.settings_look(ui);
                         ui.add_space(10.0);
                         self.settings_security(ui);
+                        ui.add_space(10.0);
+                        self.settings_updates(ui);
                     }
                     SettingsTab::Sound => self.settings_sound(ui),
                     SettingsTab::Drawing => self.settings_drawing(ui),
@@ -1379,11 +1369,6 @@ impl LeadApp {
                         self.settings_groups(ui);
                         ui.add_space(10.0);
                         self.settings_leads(ui);
-                    }
-                    SettingsTab::Data => {
-                        self.settings_files(ui);
-                        ui.add_space(10.0);
-                        self.settings_updates(ui);
                     }
                 }
             });
@@ -1543,9 +1528,6 @@ impl LeadApp {
         };
         key_combo(ui, "ptt", "Утримувати, щоб говорити:", &mut s.ptt_key);
         key_combo(ui, "toggle", "Увімкнути або вимкнути:", &mut s.mic_toggle_key);
-        ui.add_space(12.0);
-        theme::section(ui, "Міні-панель");
-        theme::toggle(ui, &mut s.mini_on_top, "Поверх усіх вікон");
         if s != before {
             self.save_lead(|l| *l = s);
         }
@@ -1778,112 +1760,6 @@ impl LeadApp {
         }
     }
 
-    fn settings_files(&mut self, ui: &mut egui::Ui) {
-        theme::section(ui, "Резервна копія і пресети");
-        ui.horizontal(|ui| {
-            ui.label("Пароль файлу:");
-            ui.add(egui::TextEdit::singleline(&mut self.draft.file_password).password(true).desired_width(220.0));
-        });
-        ui.add_space(8.0);
-        ui.strong("Резервна копія (лише налаштування)");
-        ui.horizontal(|ui| {
-            if ui.button("Зберегти копію…").clicked() {
-                self.export_backup();
-            }
-            if ui.button("Відновити з копії…").clicked() {
-                self.import_backup();
-            }
-        });
-        ui.add_space(12.0);
-        ui.strong("Пресет швидкого встановлення");
-        theme::toggle(ui, &mut self.draft.preset_lead, "Пресет для керівника");
-        if ui.button("Створити пресет…").clicked() {
-            self.export_preset();
-        }
-    }
-
-    fn file_password_ok(&mut self) -> bool {
-        if self.draft.file_password.len() < 4 {
-            self.draft.message = "Задай пароль файлу, мінімум 4 символи.".into();
-            return false;
-        }
-        true
-    }
-
-    fn write_file(&mut self, name: &str, ext: &str, bytes: anyhow::Result<Vec<u8>>) {
-        let Some(path) = rfd::FileDialog::new().set_file_name(name).add_filter("TL Supporter", &[ext]).save_file() else { return };
-        self.draft.message = match bytes.and_then(|b| Ok(std::fs::write(&path, b)?)) {
-            Ok(()) => format!("Збережено: {}", path.display()),
-            Err(e) => format!("Помилка: {e}"),
-        };
-    }
-
-    fn export_backup(&mut self) {
-        if !self.file_password_ok() {
-            return;
-        }
-        let backup = {
-            let st = self.node.state.read();
-            Backup {
-                lead: st.lead.clone(),
-                groups: st.directory.groups.clone(),
-                phrases: st.directory.phrases.clone(),
-                policy: Some(st.directory.policy.clone()),
-                team_id: st.directory.team_id.clone(),
-            }
-        };
-        let bytes = model::seal_backup(&self.draft.file_password, &backup);
-        self.write_file("tlsupporter.tlbackup", "tlbackup", bytes);
-    }
-
-    fn import_backup(&mut self) {
-        let Some(path) = rfd::FileDialog::new().add_filter("TL Supporter", &["tlbackup"]).pick_file() else { return };
-        let result = std::fs::read(&path).map_err(anyhow::Error::from).and_then(|b| model::open_backup(&self.draft.file_password, &b));
-        match result {
-            Ok(b) => {
-                self.save_lead(|l| *l = b.lead.clone());
-                self.node.update_directory(|d, me| {
-                    for (k, mut g) in b.groups {
-                        g.rev = Rev::new(me);
-                        d.groups.insert(k, g);
-                    }
-                    for (k, mut p) in b.phrases {
-                        p.rev = Rev::new(me);
-                        d.phrases.insert(k, p);
-                    }
-                    if let Some(mut p) = b.policy {
-                        p.rev = Rev::new(me);
-                        d.policy = p;
-                    }
-                });
-                self.draft.message = "Налаштування відновлено.".into();
-            }
-            Err(e) => self.draft.message = format!("Не вдалося відкрити: {e}"),
-        }
-    }
-
-    fn export_preset(&mut self) {
-        if !self.file_password_ok() {
-            return;
-        }
-        let lead = self.draft.preset_lead;
-        let preset = {
-            let st = self.node.state.read();
-            Preset {
-                role: if lead { Role::Lead } else { Role::Agent },
-                group: String::new(),
-                directory: if lead { st.directory.clone() } else { st.directory.for_agent() },
-                lead: lead.then(|| {
-                    let mut s = st.lead.clone();
-                    s.console_password.clear();
-                    s
-                }),
-            }
-        };
-        let bytes = model::seal_preset(&self.draft.file_password, &preset);
-        self.write_file(if lead { "lead.tlpreset" } else { "agent.tlpreset" }, "tlpreset", bytes);
-    }
-
     fn settings_updates(&mut self, ui: &mut egui::Ui) {
         theme::section(ui, "Оновлення");
         ui.label(format!("Поточна версія: {}", crate::util::APP_VERSION));
@@ -1981,10 +1857,6 @@ impl eframe::App for LeadApp {
         self.check_auto_lock();
         if self.locked {
             self.lock_screen(ctx);
-            return;
-        }
-        if self.mini {
-            self.mini_view(ctx);
             return;
         }
         self.nav_rail(ctx);

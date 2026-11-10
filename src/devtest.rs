@@ -2,7 +2,7 @@
 //! is set, so a normal installation cannot use them.
 
 use crate::agent_ui::UiHandle;
-use crate::model::{self, Directory, LocalState, MemberState, Preset, Rev, Role};
+use crate::model::{self, Directory, LocalState, MemberState, Rev, Role};
 use crate::proto::{DrawOp, Mode, ScreenLevel, Tool};
 use crate::secure::{self, Identity};
 use anyhow::{bail, Result};
@@ -17,23 +17,6 @@ pub fn employee_mode(value: &str) -> Result<()> {
     let mut st = model::load_state();
     st.work_as_agent = value == "on";
     model::save_state(&st)
-}
-
-pub fn export_preset(path: &str, password: &str, lead: bool) -> Result<()> {
-    let st = model::load_state();
-    let preset = Preset {
-        role: if lead { Role::Lead } else { Role::Agent },
-        group: String::new(),
-        directory: if lead { st.directory.clone() } else { st.directory.for_agent() },
-        lead: lead.then(|| st.lead.clone()),
-    };
-    std::fs::write(path, model::seal_preset(password, &preset)?)?;
-    Ok(())
-}
-
-pub fn import_preset(identity: &Identity, path: &str, password: &str, name: &str) -> Result<()> {
-    let state = crate::setup_ui::state_from_preset(identity, std::path::Path::new(path), password, name)?;
-    model::save_state(&state)
 }
 
 fn wait_for(limit_secs: u64, mut check: impl FnMut() -> bool) -> Option<Duration> {

@@ -241,7 +241,7 @@ impl Node {
             self.ui.send(UiCmd::Active(any_active));
         }
         if play {
-            sysutil::play_connect_sound();
+            sysutil::play_connect_sound(audio::connect_volume());
         }
     }
 

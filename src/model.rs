@@ -3,7 +3,7 @@
 
 use crate::secure;
 use crate::util::{data_dir, now_ms};
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -309,7 +309,6 @@ pub struct LeadSettings {
     pub lock_on_sleep: bool,
     pub ptt_key: u32,
     pub mic_toggle_key: u32,
-    pub mini_on_top: bool,
     pub grid_view: bool,
     pub mic_mode_client: bool,
     pub personal_phrases: Vec<String>,
@@ -323,6 +322,8 @@ pub struct LeadSettings {
     /// How loud this lead hears the employee's microphone and the computer sound.
     pub mix_agent: f32,
     pub mix_system: f32,
+    /// How much the lead's own microphone is amplified.
+    pub mic_gain: f32,
     /// Empty means the Windows default device.
     pub mic_device: String,
     pub speaker_device: String,
@@ -341,7 +342,6 @@ impl Default for LeadSettings {
             lock_on_sleep: true,
             ptt_key: 0x75,        // F6
             mic_toggle_key: 0x76, // F7
-            mini_on_top: true,
             grid_view: false,
             mic_mode_client: false,
             personal_phrases: Vec::new(),
@@ -354,6 +354,7 @@ impl Default for LeadSettings {
             pointer_size: 10.0,
             mix_agent: 1.0,
             mix_system: 1.0,
+            mic_gain: 1.0,
             mic_device: String::new(),
             speaker_device: String::new(),
             do_not_disturb: false,
@@ -455,59 +456,6 @@ pub fn merge_audit(mine: &mut Vec<LogEntry>, other: &[LogEntry]) -> bool {
     changed
 }
 
-const PRESET_MAGIC: &str = "TLSPRESET1";
-const BACKUP_MAGIC: &str = "TLSBACKUP1";
-
-/// Quick-install file: joins a PC to the team and, for a lead, carries all their settings.
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
-#[serde(default)]
-pub struct Preset {
-    pub role: Role,
-    pub group: String,
-    pub directory: Directory,
-    pub lead: Option<LeadSettings>,
-}
-
-/// Settings only. Holds no keys and gives no access to the team.
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
-#[serde(default)]
-pub struct Backup {
-    pub lead: LeadSettings,
-    pub groups: BTreeMap<String, Group>,
-    pub phrases: BTreeMap<String, PhraseSet>,
-    pub policy: Option<Policy>,
-    pub team_id: String,
-}
-
-fn seal_file<T: Serialize>(magic: &str, password: &str, value: &T) -> Result<Vec<u8>> {
-    let plain = serde_json::to_vec(value)?;
-    let mut out = magic.as_bytes().to_vec();
-    out.extend_from_slice(&secure::seal_with_password(password, &plain)?);
-    Ok(out)
-}
-
-fn open_file<T: DeserializeOwned>(magic: &str, password: &str, blob: &[u8]) -> Result<T> {
-    let body = blob.strip_prefix(magic.as_bytes()).ok_or_else(|| anyhow!("невірний тип файлу"))?;
-    let plain = secure::open_with_password(password, body)?;
-    Ok(serde_json::from_slice(&plain)?)
-}
-
-pub fn seal_preset(password: &str, p: &Preset) -> Result<Vec<u8>> {
-    seal_file(PRESET_MAGIC, password, p)
-}
-
-pub fn open_preset(password: &str, blob: &[u8]) -> Result<Preset> {
-    open_file(PRESET_MAGIC, password, blob)
-}
-
-pub fn seal_backup(password: &str, b: &Backup) -> Result<Vec<u8>> {
-    seal_file(BACKUP_MAGIC, password, b)
-}
-
-pub fn open_backup(password: &str, blob: &[u8]) -> Result<Backup> {
-    open_file(BACKUP_MAGIC, password, blob)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -594,12 +542,4 @@ mod tests {
         assert!(!m.rights.full_access, "full access must be granted explicitly");
     }
 
-    #[test]
-    fn preset_roundtrip_needs_password() {
-        let p = Preset { role: Role::Lead, ..Default::default() };
-        let blob = seal_preset("pw", &p).unwrap();
-        assert_eq!(open_preset("pw", &blob).unwrap().role, Role::Lead);
-        assert!(open_preset("x", &blob).is_err());
-        assert!(open_backup("pw", &blob).is_err());
-    }
 }
