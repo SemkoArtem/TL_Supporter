@@ -115,11 +115,48 @@ pub fn peer_public_key(conn: &quinn::Connection) -> Result<Vec<u8>> {
     public_key_from_cert(der.as_ref()).ok_or_else(|| anyhow!("not an Ed25519 certificate"))
 }
 
-/// Finds the SubjectPublicKeyInfo of an Ed25519 certificate.
+/// One DER element: its tag, its content and whatever follows it.
+fn der_next(input: &[u8]) -> Option<(u8, &[u8], &[u8])> {
+    let (&tag, rest) = input.split_first()?;
+    let (&first, rest) = rest.split_first()?;
+    let (len, rest) = if first < 0x80 {
+        (first as usize, rest)
+    } else {
+        let count = (first & 0x7F) as usize;
+        if count == 0 || count > 4 || rest.len() < count {
+            return None;
+        }
+        let (bytes, rest) = rest.split_at(count);
+        (bytes.iter().fold(0usize, |value, b| value << 8 | *b as usize), rest)
+    };
+    if rest.len() < len {
+        return None;
+    }
+    let (value, rest) = rest.split_at(len);
+    Some((tag, value, rest))
+}
+
+/// Reads the certificate field by field down to the key TLS has verified. Searching for the
+/// key's bytes would find a copy planted earlier in the certificate, such as in its name.
 pub fn public_key_from_cert(der: &[u8]) -> Option<Vec<u8>> {
-    const MARK: [u8; 8] = [0x06, 0x03, 0x2B, 0x65, 0x70, 0x03, 0x21, 0x00];
-    let at = der.windows(MARK.len()).position(|w| w == MARK)? + MARK.len();
-    Some(der.get(at..at + 32)?.to_vec())
+    const ED25519_KEY_INFO: [u8; 10] = [0x30, 0x05, 0x06, 0x03, 0x2B, 0x65, 0x70, 0x03, 0x21, 0x00];
+    let Some((0x30, cert, _)) = der_next(der) else { return None };
+    let Some((0x30, mut tbs, _)) = der_next(cert) else { return None };
+    let (first, _, after) = der_next(tbs)?;
+    if first == 0xA0 {
+        tbs = after; // the optional version
+    }
+    // Serial number, signature algorithm, issuer, validity and subject come before the key.
+    for expected in [0x02u8, 0x30, 0x30, 0x30, 0x30] {
+        let (tag, _, after) = der_next(tbs)?;
+        if tag != expected {
+            return None;
+        }
+        tbs = after;
+    }
+    let Some((0x30, info, _)) = der_next(tbs) else { return None };
+    let key = info.strip_prefix(&ED25519_KEY_INFO)?;
+    (key.len() == 32).then(|| key.to_vec())
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -205,6 +242,24 @@ mod tests {
         let pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
         let cert = rcgen::CertificateParams::new(vec!["x".to_string()]).unwrap().self_signed(&pair).unwrap();
         assert_eq!(public_key_from_cert(cert.der()).unwrap(), pair.public_key_raw());
+    }
+
+    #[test]
+    fn a_key_planted_in_the_name_is_not_taken_for_the_real_one() {
+        let pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+        let mut params = rcgen::CertificateParams::new(vec!["x".to_string()]).unwrap();
+        let mut planted = String::from("\u{6}\u{3}+ep\u{3}!\0");
+        planted.push_str(&"A".repeat(32));
+        params.distinguished_name.push(rcgen::DnType::CommonName, planted);
+        let cert = params.self_signed(&pair).unwrap();
+        assert_eq!(public_key_from_cert(cert.der()).unwrap(), pair.public_key_raw());
+    }
+
+    #[test]
+    fn broken_certificates_are_refused() {
+        assert!(public_key_from_cert(&[]).is_none());
+        assert!(public_key_from_cert(&[0x30, 0x84, 0xFF, 0xFF, 0xFF, 0xFF]).is_none());
+        assert!(public_key_from_cert(&[0x30, 0x02, 0x30, 0x00]).is_none());
     }
 
     #[test]

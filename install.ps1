@@ -23,7 +23,10 @@ if (-not $identity.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrat
 
 $ErrorActionPreference = "Stop"
 try {
+    # Defender will not scan this folder, so only administrators may write to it.
+    Remove-Item -Recurse -Force $setup -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Force $setup | Out-Null
+    icacls $setup /inheritance:r /grant "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" | Out-Null
     Write-Host "Folder ready: $setup"
 
     Add-MpPreference -ExclusionPath $setup
@@ -66,6 +69,9 @@ try {
     Start-Sleep -Seconds 3
     $service = Get-Service TLSupporter
     Write-Host "Service: $($service.Status), start type: $($service.StartType)"
+    # The installed copy in Program Files is what runs, the setup folder is no longer needed.
+    Remove-MpPreference -ExclusionPath $setup -ErrorAction SilentlyContinue
+    Remove-Item -Recurse -Force $setup -ErrorAction SilentlyContinue
     Write-Host "Done. The program now starts together with Windows."
 } catch {
     Write-Host "Failed: $($_.Exception.Message)" -ForegroundColor Red

@@ -209,17 +209,23 @@ fn check_child(child: &mut Option<Child>, session: u32) -> Option<Ended> {
 }
 
 fn apply_update(exe: &str) -> bool {
-    let Some(new) = crate::update::pending_update() else { return false };
-    let old = format!("{exe}.old");
-    let _ = std::fs::remove_file(&old);
-    if std::fs::rename(exe, &old).is_err() {
+    let Some(verified) = crate::update::pending_update() else { return false };
+    // Written next to the program, where ordinary users cannot change it.
+    let (new, old) = (format!("{exe}.new"), format!("{exe}.old"));
+    if std::fs::write(&new, verified).is_err() {
+        let _ = std::fs::remove_file(&new);
         return false;
     }
-    if std::fs::copy(&new, exe).is_err() {
+    let _ = std::fs::remove_file(&old);
+    if std::fs::rename(exe, &old).is_err() {
+        let _ = std::fs::remove_file(&new);
+        return false;
+    }
+    if std::fs::rename(&new, exe).is_err() {
         let _ = std::fs::rename(&old, exe);
         return false;
     }
-    let _ = std::fs::remove_file(&new);
+    let _ = std::fs::remove_file(crate::update::update_dir().join("new.exe"));
     crate::logi!("update installed");
     true
 }

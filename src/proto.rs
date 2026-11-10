@@ -28,6 +28,8 @@ pub struct Mode {
     pub monitor: u8,
     /// 0 maximum, 1 high, 2 medium, 3 low.
     pub quality: u8,
+    /// The lead's session is open but out of sight, so no picture is needed for now.
+    pub parked: bool,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -176,6 +178,30 @@ pub async fn read_msg(rx: &mut quinn::RecvStream) -> Result<Option<Msg>> {
     let mut body = vec![0u8; len];
     rx.read_exact(&mut body).await?;
     Ok(rmp_serde::from_slice(&body).ok())
+}
+
+/// The first message of a connection comes before the peer is known, so it may not ask for much.
+const MAX_HELLO: usize = 64 * 1024;
+
+async fn read_hello_frame(rx: &mut quinn::RecvStream) -> Result<Hello> {
+    let mut len = [0u8; 4];
+    rx.read_exact(&mut len).await?;
+    let len = u32::from_le_bytes(len) as usize;
+    if len > MAX_HELLO {
+        return Err(anyhow!("hello too large"));
+    }
+    let mut body = vec![0u8; len];
+    rx.read_exact(&mut body).await?;
+    match rmp_serde::from_slice::<Msg>(&body)? {
+        Msg::Hello(h) => Ok(h),
+        _ => Err(anyhow!("expected hello")),
+    }
+}
+
+pub async fn read_hello(rx: &mut quinn::RecvStream) -> Result<Hello> {
+    tokio::time::timeout(std::time::Duration::from_secs(10), read_hello_frame(rx))
+        .await
+        .map_err(|_| anyhow!("hello timed out"))?
 }
 
 /// Audio datagram: `[source][sender u32][seq u16][opus...]`.

@@ -63,6 +63,8 @@ struct SettingsDraft {
     exit_pw: String,
     reset_pw: String,
     role_pw: String,
+    update_busy: bool,
+    update_result: std::sync::Arc<parking_lot::Mutex<Option<String>>>,
     old_admin_pw: String,
     owner_pw: String,
     role_error: String,
@@ -333,7 +335,7 @@ impl LeadApp {
     }
 
     fn dev_auto_session(&mut self) {
-        if std::env::var("TLS_DATA_DIR").is_err() || std::env::var("TLS_AUTO_SESSION").is_err() || !self.tabs.is_empty() {
+        if crate::util::test_env("TLS_DATA_DIR").is_none() || crate::util::test_env("TLS_AUTO_SESSION").is_none() || !self.tabs.is_empty() {
             return;
         }
         if self.last_tick.elapsed().is_err() {
@@ -341,7 +343,7 @@ impl LeadApp {
         }
         let online = self.node.peers.lock().keys().next().cloned();
         if let (Some(id), true) = (online, self.started.elapsed().as_secs() >= 6) {
-            self.open_session(&id, Some(Mode { listen: true, screen: ScreenLevel::Full, monitor: 0, quality: 0 }));
+            self.open_session(&id, Some(Mode { listen: true, screen: ScreenLevel::Full, monitor: 0, quality: 0, parked: false }));
         }
     }
 
@@ -517,7 +519,7 @@ impl LeadApp {
                     if h.taken_by.is_empty() {
                         if ui.button(if missed { tr("Підключитись") } else { tr("Взяти") }).clicked() {
                             self.node.lead_take_help(&h.target, h.id);
-                            self.open_session(&h.target, Some(Mode { listen: true, screen: ScreenLevel::Full, monitor: 0, quality: 0 }));
+                            self.open_session(&h.target, Some(Mode { listen: true, screen: ScreenLevel::Full, monitor: 0, quality: 0, parked: false }));
                         }
                     } else {
                         ui.label(format!("{}: {}", tr("Узяв(ла)"), h.taken_by));
@@ -875,8 +877,25 @@ impl LeadApp {
         ui.separator();
     }
 
+    fn i_am_admin(&self) -> bool {
+        self.node.state.read().directory.member(&self.node.identity.id).is_some_and(|m| m.rights.admin)
+    }
+
+    /// Without the administration right a lead manages only employees' PCs in their own groups.
+    fn can_revoke(&self, id: &str) -> bool {
+        let admin = self.i_am_admin();
+        let st = self.node.state.read();
+        let d = &st.directory;
+        let me = &self.node.identity.id;
+        let Some(m) = d.member(id) else { return false };
+        if d.owner_id == id {
+            return false;
+        }
+        admin || m.state != MemberState::Approved || (m.role == Role::Agent && d.lead_can_reach(me, id))
+    }
+
     fn revoke(&self, id: &str, name: &str) {
-        if self.node.state.read().directory.owner_id == id {
+        if !self.can_revoke(id) {
             return;
         }
         let target = id.to_string();
@@ -939,10 +958,10 @@ impl LeadApp {
                 }
                 ui.add_enabled_ui(online, |ui| {
                     if theme::tool_button(ui, icon::HEADPHONE, false, tr("Лише слухати")).clicked() {
-                        self.open_session(id, Some(Mode { listen: true, screen: ScreenLevel::Off, monitor: 0, quality: 0 }));
+                        self.open_session(id, Some(Mode { listen: true, screen: ScreenLevel::Off, monitor: 0, quality: 0, parked: false }));
                     }
                     if ui.add(theme::accent_button(tr("Підключитись"))).clicked() {
-                        self.open_session(id, Some(Mode { listen: true, screen: ScreenLevel::Full, monitor: 0, quality: 0 }));
+                        self.open_session(id, Some(Mode { listen: true, screen: ScreenLevel::Full, monitor: 0, quality: 0, parked: false }));
                     }
                 });
             });
@@ -989,7 +1008,7 @@ impl LeadApp {
                         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                     }
                     if r.clicked() && online {
-                        self.open_session(id, Some(Mode { listen: true, screen: ScreenLevel::Full, monitor: 0, quality: 0 }));
+                        self.open_session(id, Some(Mode { listen: true, screen: ScreenLevel::Full, monitor: 0, quality: 0, parked: false }));
                     }
                     r.context_menu(|ui| self.member_menu(ui, id, &name));
                     ui.add_space(6.0);
@@ -1009,10 +1028,10 @@ impl LeadApp {
                     ui.horizontal(|ui| {
                         ui.add_enabled_ui(online, |ui| {
                             if ui.add(theme::accent_button(tr("Підключитись"))).clicked() {
-                                self.open_session(id, Some(Mode { listen: true, screen: ScreenLevel::Full, monitor: 0, quality: 0 }));
+                                self.open_session(id, Some(Mode { listen: true, screen: ScreenLevel::Full, monitor: 0, quality: 0, parked: false }));
                             }
                             if theme::tool_button(ui, icon::HEADPHONE, false, tr("Лише слухати")).clicked() {
-                                self.open_session(id, Some(Mode { listen: true, screen: ScreenLevel::Off, monitor: 0, quality: 0 }));
+                                self.open_session(id, Some(Mode { listen: true, screen: ScreenLevel::Off, monitor: 0, quality: 0, parked: false }));
                             }
                         });
                         if theme::tool_button(ui, icon::MORE, false, tr("Ім'я, група, запити")).clicked() {
@@ -1041,6 +1060,9 @@ impl LeadApp {
         let mut l = self.node.lead.lock();
         let Some(t) = l.targets.get_mut(id) else { return };
         let (w, h, epoch) = (t.screen.width as usize, t.screen.height as usize, t.screen.epoch);
+        // The tiles are taken out so that the network and sound are not kept waiting for them.
+        let tiles = std::mem::take(&mut t.screen.tiles);
+        drop(l);
         if w == 0 || h == 0 {
             self.textures.remove(id);
             return;
@@ -1052,11 +1074,12 @@ impl LeadApp {
             self.textures.insert(id.to_string(), ScreenTex { epoch, handle });
         }
         let tex = self.textures.get_mut(id).unwrap();
-        for ((x, y), tile) in t.screen.tiles.drain() {
+        for ((x, y), tile) in tiles {
             if x as usize + tile.w > w || y as usize + tile.h > h {
                 continue;
             }
-            let image = egui::ColorImage::from_rgba_unmultiplied([tile.w, tile.h], &tile.rgba);
+            // A screen has no transparency, so there is nothing to convert.
+            let image = egui::ColorImage::from_rgba_premultiplied([tile.w, tile.h], &tile.rgba);
             tex.handle.set_partial([x as usize, y as usize], image, TextureOptions::LINEAR);
         }
     }
@@ -1643,8 +1666,8 @@ impl LeadApp {
                 if ui.button(tr("Змінити")).clicked() && !self.draft.new_admin_pw.is_empty() {
                     if !secure::check_password(&current, &self.draft.old_admin_pw) {
                         self.draft.message = tr("Невірний адмінський пароль.").into();
-                    } else if self.draft.new_admin_pw.chars().count() < 4 {
-                        self.draft.message = tr("Пароль має бути не коротшим за 4 символи.").into();
+                    } else if self.draft.new_admin_pw.chars().count() < 8 {
+                        self.draft.message = tr("Пароль має бути не коротшим за 8 символів.").into();
                     } else {
                         let h = secure::hash_password(&self.draft.new_admin_pw);
                         self.draft.new_admin_pw.clear();
@@ -1669,6 +1692,7 @@ impl LeadApp {
                         let admin = self.node.state.read().directory.policy.admin_password.clone();
                         if !self.draft.exit_pw.is_empty() && secure::check_password(&admin, &self.draft.exit_pw) {
                             self.node.audit_log("—", "Вихід із програми");
+                            self.node.flush_audit();
                             std::process::exit(crate::service::EXIT_STOPPED as i32);
                         }
                         self.draft.exit_pw.clear();
@@ -1764,6 +1788,9 @@ impl LeadApp {
     }
 
     fn update_policy(&self, f: impl FnOnce(&mut model::Policy)) {
+        if !self.i_am_admin() {
+            return;
+        }
         self.node.update_directory(|d, me| {
             f(&mut d.policy);
             d.policy.rev = Rev::new(me);
@@ -1771,6 +1798,7 @@ impl LeadApp {
     }
 
     fn settings_drawing(&mut self, ui: &mut egui::Ui) {
+        let admin = self.i_am_admin();
         let mut p = self.node.state.read().directory.policy.clone();
         let before = p.clone();
         let mut s = self.node.state.read().lead.clone();
@@ -1792,11 +1820,12 @@ impl LeadApp {
                 ui.add(egui::Slider::new(&mut s.semi_alpha, 0.1..=0.9));
                 ui.end_row();
                 ui.label(tr("Зникає через, с"));
-                ui.add(egui::Slider::new(&mut p.stroke_fade_sec, 1..=120));
+                ui.add_enabled(admin, egui::Slider::new(&mut p.stroke_fade_sec, 1..=120));
                 ui.end_row();
             });
         });
         theme::card(ui, tr("У працівника"), |ui| {
+            if !admin { ui.disable(); }
             theme::toggle(ui, &mut p.allow_hide_key, tr("Може сховати малюнки (Ctrl+Alt+H)"));
             ui.add_enabled_ui(p.allow_hide_key, |ui| {
                 ui.horizontal(|ui| {
@@ -1814,9 +1843,11 @@ impl LeadApp {
     }
 
     fn settings_hints(&mut self, ui: &mut egui::Ui) {
+        let admin = self.i_am_admin();
         let mut p = self.node.state.read().directory.policy.clone();
         let before = p.clone();
         theme::card(ui, tr("Запити допомоги"), |ui| {
+            if !admin { ui.disable(); }
             theme::toggle(ui, &mut p.show_help_button, tr("Кнопка допомоги у працівника"));
             theme::toggle(ui, &mut p.sound_on_connect, tr("Звук при підключенні"));
             ui.horizontal(|ui| {
@@ -1845,6 +1876,7 @@ impl LeadApp {
         });
         let sets: Vec<PhraseSet> = self.node.state.read().directory.phrases.values().filter(|p| !p.deleted).cloned().collect();
         theme::card(ui, tr("Спільні фрази команди"), |ui| {
+            if !admin { ui.disable(); }
             for set in sets {
                 ui.strong(tr(&set.name));
                 let text = self.draft.phrase_edit.entry(set.id.clone()).or_insert_with(|| set.phrases.iter().map(|p| tr(p)).collect::<Vec<_>>().join("\n"));
@@ -1890,7 +1922,11 @@ impl LeadApp {
     fn group_options(&self) -> Vec<(String, String)> {
         let st = self.node.state.read();
         let mut v: Vec<(String, String)> = vec![(String::new(), tr("Без групи").to_string())];
-        v.extend(st.directory.groups.values().filter(|g| !g.deleted).map(|g| (g.id.clone(), tr(&g.name).to_string())));
+        // A lead limited to some groups cannot move PCs into the others.
+        let me = st.directory.member(&self.node.identity.id);
+        let admin = me.is_some_and(|m| m.rights.admin);
+        let allowed = me.map(|m| m.lead_groups.clone()).unwrap_or_default();
+        v.extend(st.directory.groups.values().filter(|g| !g.deleted && (admin || allowed.is_empty() || allowed.contains(&g.id))).map(|g| (g.id.clone(), tr(&g.name).to_string())));
         v
     }
 
@@ -1973,17 +2009,29 @@ impl LeadApp {
     }
 
     fn settings_updates(&mut self, ui: &mut egui::Ui) {
+        let admin = self.i_am_admin();
+        if let Some(result) = self.draft.update_result.lock().take() {
+            self.draft.update_status = result;
+            self.draft.update_busy = false;
+        }
         ui.label(format!("{}: {}", tr("Поточна версія"), crate::util::APP_VERSION));
         ui.horizontal(|ui| {
             ui.label("GitHub");
             ui.add(egui::TextEdit::singleline(&mut self.draft.repo).desired_width(240.0).hint_text(tr("власник/назва")));
-            if ui.button(tr("Зберегти")).clicked() {
+            if ui.add_enabled(admin, egui::Button::new(tr("Зберегти"))).clicked() {
                 let repo = self.draft.repo.trim().to_string();
                 self.update_policy(|p| p.update_repo = repo);
             }
         });
-        if ui.button(tr("Перевірити й розіслати")).clicked() {
-            self.draft.update_status = crate::update::check_and_distribute(&self.node);
+        if ui.add_enabled(admin && !self.draft.update_busy, egui::Button::new(tr("Перевірити й розіслати"))).clicked() {
+            // Downloading can take minutes and the window must keep working meanwhile.
+            self.draft.update_busy = true;
+            self.draft.update_status = tr("Перевіряю…").to_string();
+            let (node, result, repaint) = (self.node.clone(), self.draft.update_result.clone(), ui.ctx().clone());
+            std::thread::spawn(move || {
+                *result.lock() = Some(crate::update::check_and_distribute(&node));
+                repaint.request_repaint();
+            });
         }
         ui.label(&self.draft.update_status);
     }
@@ -2033,7 +2081,7 @@ impl LeadApp {
                     self.node.audit_log(&log_name, "Змінено ім'я або групу");
                     done = true;
                 }
-                if ui.add_enabled(!main_pc, egui::Button::new(tr("Скасувати доступ"))).clicked() {
+                if ui.add_enabled(self.can_revoke(&dlg.id), egui::Button::new(tr("Скасувати доступ"))).clicked() {
                     self.revoke(&dlg.id, &dlg.name);
                     done = true;
                 }
@@ -2108,6 +2156,11 @@ impl eframe::App for LeadApp {
         self.help_banner(ctx);
         if self.page != Page::Home {
             self.node.lead_set_thumbs(false);
+        }
+        // Only the session being looked at receives a picture.
+        let visible = if self.page == Page::Session { self.active.clone() } else { None };
+        for tab in &self.tabs {
+            self.node.lead_set_parked(tab, Some(tab) != visible.as_ref());
         }
         match self.page {
             Page::Home => self.home(ctx),

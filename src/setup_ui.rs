@@ -15,16 +15,19 @@ pub const RESTART_FLAG: &str = "restart.flag";
 pub const SETTINGS_TITLE: &str = "TL Supporter Settings";
 pub const EXIT_TITLE: &str = "Close TL Supporter";
 
-/// What the exit request must contain. The data folder is writable by every user, so an empty
-/// file must not be enough to close the program.
-pub fn exit_token() -> Vec<u8> {
-    let st = model::load_state();
-    secure::sha256(format!("tlsupporter-exit:{}", st.directory.policy.admin_password).as_bytes())
+/// The data folder is writable by every user, so an exit request has to contain the admin
+/// password itself. It is sealed for this Windows account and the file lives for a second.
+pub fn exit_request_valid(request: &[u8]) -> bool {
+    let Ok(plain) = secure::dpapi_unprotect_user(request) else { return false };
+    let Ok(password) = String::from_utf8(plain) else { return false };
+    !password.is_empty() && secure::check_password(&model::load_state().directory.policy.admin_password, &password)
 }
 
-/// Ask the running program to close. Call only after the admin password was checked.
-fn request_exit() {
-    let _ = std::fs::write(crate::util::data_dir().join(EXIT_FLAG), exit_token());
+/// Ask the running program to close.
+pub fn request_exit(password: &str) {
+    if let Ok(sealed) = secure::dpapi_protect_user(password.as_bytes()) {
+        let _ = std::fs::write(crate::util::data_dir().join(EXIT_FLAG), sealed);
+    }
 }
 
 fn options(title: &str, w: f32, h: f32) -> eframe::NativeOptions {
@@ -89,8 +92,8 @@ impl Setup {
             self.error = tr("Заповни ім'я і назву команди.").into();
             return;
         }
-        if self.password.len() < 4 || self.password != self.password2 {
-            self.error = tr("Паролі не збігаються або коротші за 4 символи.").into();
+        if self.password.chars().count() < 8 || self.password != self.password2 {
+            self.error = tr("Паролі не збігаються або коротші за 8 символів.").into();
             return;
         }
         match Directory::new(self.team.trim(), &self.identity, self.name.trim(), secure::hash_password(&self.password)) {
@@ -204,6 +207,7 @@ struct Settings {
     connect_sound: f32,
     password: String,
     unlocked: bool,
+    unlocked_with: String,
     error: String,
     message: String,
 }
@@ -272,6 +276,7 @@ impl eframe::App for Settings {
                     if ui.button(tr("Розблокувати")).clicked() {
                         if secure_check(&st, &self.password) {
                             self.unlocked = true;
+                            self.unlocked_with = self.password.clone();
                             self.error.clear();
                         } else {
                             self.error = tr("Невірний пароль").into();
@@ -301,7 +306,7 @@ impl eframe::App for Settings {
                     }
                 }
                 if ui.button(tr("Вийти з програми до наступного входу в Windows")).clicked() {
-                    request_exit();
+                    request_exit(&self.unlocked_with);
                     self.message = tr("Програму буде закрито.").into();
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
@@ -363,7 +368,7 @@ impl eframe::App for ExitPrompt {
             });
             if close {
                 if !self.password.is_empty() && secure_check(&model::load_state(), &self.password) {
-                    request_exit();
+                    request_exit(&self.password);
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 } else {
                     self.error = tr("Невірний пароль").into();
@@ -393,7 +398,7 @@ pub fn run_settings(identity: Identity) {
         Box::new(move |cc| {
             theme::apply(&cc.egui_ctx, model::load_state().lead.light_theme);
             let new_name = model::load_state().directory.member(&identity.id).map(|m| m.name.clone()).unwrap_or_default();
-            Ok(Box::new(Settings { new_name, id: identity.id, key: Default::default(), confirm_reset: false, voice: crate::audio::load_voice_volume(), connect_sound: crate::audio::connect_volume(), password: String::new(), unlocked: false, error: String::new(), message: String::new() }))
+            Ok(Box::new(Settings { new_name, id: identity.id, key: Default::default(), confirm_reset: false, voice: crate::audio::load_voice_volume(), connect_sound: crate::audio::connect_volume(), password: String::new(), unlocked: false, unlocked_with: String::new(), error: String::new(), message: String::new() }))
         }),
     );
 }

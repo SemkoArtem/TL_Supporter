@@ -73,6 +73,21 @@ pub struct TargetView {
     pub secure_holder: String,
     pub secure_control_sent: bool,
     pub want_control: bool,
+    /// The session is open on a tab the lead is not looking at, so no picture is sent.
+    pub parked: bool,
+    /// The lead was controlling this PC when the tab went out of sight.
+    pub resume_control: bool,
+}
+
+impl TargetView {
+    /// What the employee's PC is asked for, which differs from `mode` while out of sight.
+    fn wire_mode(&self) -> Mode {
+        if self.parked && self.mode.screen != ScreenLevel::Off {
+            Mode { screen: ScreenLevel::Off, parked: true, ..self.mode }
+        } else {
+            self.mode
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -236,7 +251,8 @@ impl Node {
                 let controlling = l.targets.get(&peer.id).map(|t| t.control_holder == self.identity.id).unwrap_or(false);
                 if active && controlling {
                     l.clip_applied = Some(text.clone());
-                    sysutil::clipboard_set(&text);
+                    // Not under the lock: it can wait for another program to let go of the clipboard.
+                    tokio::task::spawn_blocking(move || sysutil::clipboard_set(&text));
                 }
             }
             _ => return,
@@ -304,7 +320,8 @@ impl Node {
                     let (x, y) = (u16::from_le_bytes([b[4], b[5]]) as u32, u16::from_le_bytes([b[6], b[7]]) as u32);
                     let mut jpeg = vec![0u8; len];
                     s.read_exact(&mut jpeg).await?;
-                    let Some((w, h, rgba)) = decode_jpeg(&jpeg) else { continue };
+                    // Decoding must not hold up the sound and control running on the same threads.
+                    let Some((w, h, rgba)) = tokio::task::block_in_place(|| decode_jpeg(&jpeg)) else { continue };
                     let mut l = self.lead.lock();
                     let v = l.targets.entry(peer.id.clone()).or_default();
                     if thumb {
@@ -359,7 +376,7 @@ impl Node {
             let (send_mode, send_control) = {
                 let mut l = self.lead.lock();
                 let t = l.targets.entry(p.id.clone()).or_default();
-                let secure_screen = (t.locked || !normal) && t.mode.screen != ScreenLevel::Off;
+                let secure_screen = (t.locked || !normal) && t.mode.screen != ScreenLevel::Off && !t.parked;
                 let mode = if secure_screen { Mode { listen: false, ..t.mode } } else { Mode::default() };
                 let send_mode = (mode != t.secure_mode).then_some(mode);
                 t.secure_mode = mode;
@@ -391,24 +408,28 @@ impl Node {
     }
 
     pub fn lead_set_mode(self: &Arc<Self>, target: &str, mode: Mode) {
-        let previous = {
+        let (previous, wire) = {
             let mut l = self.lead.lock();
             let t = l.targets.entry(target.to_string()).or_default();
             let prev = t.mode;
             t.mode = mode;
+            if mode == Mode::default() {
+                t.parked = false;
+                t.resume_control = false;
+            }
             if mode.screen != ScreenLevel::Full {
                 t.want_control = false;
             }
             if mode.screen == ScreenLevel::Off {
                 t.screen = ScreenBuf { epoch: t.screen.epoch + 1, ..Default::default() };
             }
-            prev
+            (prev, t.wire_mode())
         };
         if mode.screen == ScreenLevel::Off && !mode.listen {
             self.lead.lock().targets.entry(target.to_string()).or_default().consent = 0;
         }
         if let Some(p) = self.peer(target) {
-            p.send(Msg::SetMode(mode));
+            p.send(Msg::SetMode(wire));
         }
         if previous != mode {
             let describe = |m: Mode| {
@@ -421,6 +442,36 @@ impl Node {
             };
             let name = self.member_name(target);
             self.audit_log(&name, &format!("Режим: {}", describe(mode)));
+        }
+    }
+
+    /// A session out of sight sends no picture. It comes back, with control, when the tab is shown.
+    pub fn lead_set_parked(self: &Arc<Self>, target: &str, parked: bool) {
+        let me = &self.identity.id;
+        let (wire, resume) = {
+            let mut l = self.lead.lock();
+            let Some(t) = l.targets.get_mut(target) else { return };
+            if t.parked == parked {
+                return;
+            }
+            t.parked = parked;
+            let mut resume = false;
+            if parked {
+                t.resume_control = t.control_holder == *me;
+                if t.mode.screen != ScreenLevel::Off {
+                    t.want_control = false;
+                }
+            } else {
+                resume = std::mem::take(&mut t.resume_control);
+                t.want_control |= resume;
+            }
+            (t.wire_mode(), resume)
+        };
+        if let Some(p) = self.peer(target) {
+            p.send(Msg::SetMode(wire));
+            if resume {
+                p.send(Msg::ControlRequest(true));
+            }
         }
     }
 
@@ -642,6 +693,9 @@ impl Node {
         loop {
             tick.tick().await;
             n += 1;
+            if n % 100 == 0 {
+                tokio::task::block_in_place(|| self.flush_audit());
+            }
             if !self.is_lead() || self.acting_as_agent() {
                 continue;
             }

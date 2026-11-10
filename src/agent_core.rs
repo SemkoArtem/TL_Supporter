@@ -47,6 +47,7 @@ pub struct AgentInner {
     help_open: bool,
     clip_seq: u32,
     clip_applied: Option<String>,
+    held: sysutil::HeldInput,
     cursor: Option<(u8, f32, f32)>,
     voice_logged: bool,
 }
@@ -162,6 +163,7 @@ impl Node {
                 }
                 if a.control.as_deref() == Some(&peer.id) {
                     a.control = None;
+                    a.held.release_all();
                 }
             }
             a.links.len()
@@ -176,6 +178,7 @@ impl Node {
         let sound_policy = self.state.read().directory.policy.sound_on_connect;
         let me = secure::short_id(&self.identity.id);
         let mut play = false;
+        let mut lost_control = false;
         {
             let mut guard = self.agent.lock();
             let a = &mut *guard;
@@ -220,7 +223,7 @@ impl Node {
                 if l.mode.listen && !locked && can_listen {
                     listeners.push(l.peer.conn.clone());
                 }
-                any_active |= allowed && (l.mode.listen || l.mode.screen != ScreenLevel::Off);
+                any_active |= allowed && (l.mode.listen || l.mode.parked || l.mode.screen != ScreenLevel::Off);
             }
             if listeners.is_empty() {
                 if let Some(run) = a.audio.take() {
@@ -239,6 +242,17 @@ impl Node {
             }
             a.was_active = any_active;
             self.ui.send(UiCmd::Active(any_active));
+            // The right to control can be taken away while it is in use.
+            if let Some(holder) = a.control.clone() {
+                if !self.rights_of(&holder).is_some_and(|r| r.control) {
+                    a.control = None;
+                    a.held.release_all();
+                    lost_control = true;
+                }
+            }
+        }
+        if lost_control {
+            self.broadcast_control();
         }
         if play {
             sysutil::play_connect_sound(audio::connect_volume());
@@ -255,7 +269,7 @@ impl Node {
             Msg::SetMode(mode) => {
                 let ask = {
                     let mut a = self.agent.lock();
-                    let active = mode.listen || mode.screen != ScreenLevel::Off;
+                    let active = mode.listen || mode.parked || mode.screen != ScreenLevel::Off;
                     match a.links.get_mut(&peer.id) {
                         Some(l) => {
                             l.mode = mode;
@@ -318,12 +332,13 @@ impl Node {
                 }
             }
             Msg::ControlRequest(want) => self.on_control_request(peer, want, rights.control),
-            Msg::Input(ev) => {
+            Msg::Input(ev) if rights.control => {
                 let monitor = {
-                    let a = self.agent.lock();
+                    let mut a = self.agent.lock();
                     if a.control.as_deref() != Some(&peer.id) {
                         return;
                     }
+                    a.held.note(ev);
                     a.links.get(&peer.id).map(|l| l.mode.monitor).unwrap_or(0)
                 };
                 let rects = capture::monitor_rects();
@@ -336,7 +351,8 @@ impl Node {
                 let controlling = self.agent.lock().control.as_deref() == Some(peer.id.as_str());
                 if controlling {
                     self.agent.lock().clip_applied = Some(text.clone());
-                    sysutil::clipboard_set(&text);
+                    // It can wait for another program to let go of the clipboard.
+                    tokio::task::spawn_blocking(move || sysutil::clipboard_set(&text));
                 }
             }
             _ => {}
@@ -373,6 +389,7 @@ impl Node {
             let mut a = self.agent.lock();
             if a.control.as_deref() == Some(lead) {
                 a.control = None;
+                a.held.release_all();
                 true
             } else {
                 false
@@ -391,6 +408,7 @@ impl Node {
                 a.control = Some(peer.id.clone());
             } else if !want && a.control.as_deref() == Some(&peer.id) {
                 a.control = None;
+                a.held.release_all();
             }
         }
         self.broadcast_control();
@@ -411,6 +429,9 @@ impl Node {
         };
         if !rights.whisper {
             crate::logi!("voice ignored: lead has no right to speak");
+            return;
+        }
+        if self.waits_for_consent(&peer.id) {
             return;
         }
         let relay: Vec<quinn::Connection> = {
@@ -524,7 +545,7 @@ impl Node {
         use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
         let viewers: Vec<Arc<Peer>> = {
             let a = self.agent.lock();
-            a.links.values().filter(|l| l.mode.screen != ScreenLevel::Off).map(|l| l.peer.clone()).collect()
+            a.links.values().filter(|l| l.mode.screen != ScreenLevel::Off && !self.waits_for_consent(&l.peer.id)).map(|l| l.peer.clone()).collect()
         };
         if viewers.is_empty() {
             return;
@@ -568,7 +589,7 @@ impl Node {
             if n % 15 == 0 {
                 audio::apply_voice_cfg();
                 crate::i18n::init();
-                let test_locked = std::env::var("TLS_DATA_DIR").is_ok() && crate::util::data_dir().join("fake.lock").exists();
+                let test_locked = crate::util::test_env("TLS_DATA_DIR").is_some() && crate::util::data_dir().join("fake.lock").exists();
                 let locked = sysutil::is_desktop_locked() || test_locked;
                 let (changed, peers) = {
                     let mut a = self.agent.lock();

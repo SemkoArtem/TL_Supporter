@@ -7,10 +7,21 @@ use std::sync::OnceLock;
 
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// A test setting from the environment. The copy started by the service ignores them,
+/// otherwise an employee could point the running program at a folder of their own.
+pub fn test_env(name: &str) -> Option<String> {
+    static FROM_SERVICE: OnceLock<bool> = OnceLock::new();
+    let from_service = *FROM_SERVICE.get_or_init(|| std::env::args().any(|a| a == "--from-service" || a == "--service"));
+    if from_service {
+        return None;
+    }
+    std::env::var(name).ok().filter(|v| !v.is_empty())
+}
+
 /// Data folder. `TLS_DATA_DIR` lets two copies run side by side on one PC for testing.
 pub fn data_dir() -> PathBuf {
-    let dir = match std::env::var("TLS_DATA_DIR") {
-        Ok(v) if !v.is_empty() => PathBuf::from(v),
+    let dir = match test_env("TLS_DATA_DIR") {
+        Some(v) => PathBuf::from(v),
         _ => {
             let base = std::env::var("ProgramData").unwrap_or_else(|_| r"C:\ProgramData".into());
             PathBuf::from(base).join("TLSupporter")
@@ -47,7 +58,7 @@ pub fn log_line(text: &str) {
     if let Some(f) = slot.lock().as_mut() {
         let _ = f.write_all(line.as_bytes());
     }
-    if std::env::var("TLS_CONSOLE").is_ok() {
+    if crate::util::test_env("TLS_CONSOLE").is_some() {
         eprint!("{line}");
     }
 }

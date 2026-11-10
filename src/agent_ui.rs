@@ -359,7 +359,7 @@ fn register_class(name: PCWSTR, proc_: WNDPROC) {
 fn exclude_from_capture(hwnd: HWND) {
     use windows::Win32::UI::WindowsAndMessaging::{SetWindowDisplayAffinity, WINDOW_DISPLAY_AFFINITY};
     // A test run keeps these windows visible to screenshots so the result can be inspected.
-    if std::env::var("TLS_DATA_DIR").is_ok() && std::env::var("TLS_SHOW_IN_CAPTURE").is_ok() {
+    if crate::util::test_env("TLS_DATA_DIR").is_some() && crate::util::test_env("TLS_SHOW_IN_CAPTURE").is_some() {
         return;
     }
     unsafe {

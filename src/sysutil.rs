@@ -206,6 +206,47 @@ mod clipboard_tests {
     }
 }
 
+/// Keys and mouse buttons a lead is holding down on this PC. If the lead goes away they must
+/// be let go, otherwise the employee is left with a stuck key.
+#[derive(Default)]
+pub struct HeldInput {
+    keys: std::collections::HashSet<u16>,
+    buttons: std::collections::HashSet<u8>,
+}
+
+impl HeldInput {
+    pub fn note(&mut self, ev: InputEv) {
+        match ev {
+            InputEv::Key { vk, down: true } => {
+                self.keys.insert(vk);
+            }
+            InputEv::Key { vk, down: false } => {
+                self.keys.remove(&vk);
+            }
+            InputEv::Button { button, down: true } => {
+                self.buttons.insert(button);
+            }
+            InputEv::Button { button, down: false } => {
+                self.buttons.remove(&button);
+            }
+            _ => {}
+        }
+    }
+
+    pub fn release_all(&mut self) {
+        for vk in self.keys.drain() {
+            inject(InputEv::Key { vk, down: false }, (0, 0, 1, 1));
+        }
+        for button in self.buttons.drain() {
+            inject(InputEv::Button { button, down: false }, (0, 0, 1, 1));
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty() && self.buttons.is_empty()
+    }
+}
+
 fn send(inputs: &[INPUT]) {
     unsafe {
         SendInput(inputs, std::mem::size_of::<INPUT>() as i32);
@@ -301,6 +342,17 @@ pub fn inject(ev: InputEv, rect: (i32, i32, i32, i32)) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn held_input_follows_presses_and_releases() {
+        let mut held = HeldInput::default();
+        held.note(InputEv::Key { vk: 0x41, down: true });
+        held.note(InputEv::Button { button: 0, down: true });
+        assert!(!held.is_empty());
+        held.note(InputEv::Key { vk: 0x41, down: false });
+        held.note(InputEv::Button { button: 0, down: false });
+        assert!(held.is_empty());
+    }
 
     #[test]
     fn absolute_coordinates_cover_the_desktop() {

@@ -34,8 +34,8 @@ pub const SECURE_DISCOVERY_OFFSET: u16 = 3;
 
 impl NetConfig {
     pub fn from_env() -> Self {
-        let port = |name: &str, default| std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default);
-        let extra_peers = std::env::var("TLS_PEERS")
+        let port = |name: &str, default| crate::util::test_env(name).and_then(|v| v.parse().ok()).unwrap_or(default);
+        let extra_peers = crate::util::test_env("TLS_PEERS")
             .unwrap_or_default()
             .split(',')
             .filter_map(|s| s.trim().parse().ok())
@@ -108,6 +108,8 @@ pub struct Node {
     pub add_check: Mutex<Option<AddCheck>>,
     /// What this process opened as: 0 not known, 1 employee's PC, 2 lead console.
     pub console_started: std::sync::atomic::AtomicU8,
+    /// The journal has entries not yet written to disk.
+    audit_dirty: std::sync::atomic::AtomicBool,
     pub secure_peers: Mutex<HashMap<String, Arc<Peer>>>,
     pub secure_dialing: Mutex<HashSet<String>>,
     pub hub: Arc<CaptureHub>,
@@ -200,8 +202,10 @@ impl Node {
             let mut st = self.state.write();
             if console {
                 // Whoever promoted this PC does not have to ask for permission to connect.
-                if !st.trusted_leads.iter().any(|l| l == sender) {
-                    st.trusted_leads.push(sender.to_string());
+                // The lead who made the change, even if another lead passed it on.
+                let promoter = st.directory.member(&self.identity.id).map(|m| m.rev.by.clone()).filter(|b| !b.is_empty()).unwrap_or_else(|| sender.to_string());
+                if !st.trusted_leads.iter().any(|l| *l == promoter) {
+                    st.trusted_leads.push(promoter);
                 }
             } else if !st.directory.is_approved_lead(&self.identity.id) {
                 st.directory.authority_private_b64.clear();
@@ -275,6 +279,7 @@ impl Node {
 
     pub fn switch_to_employee_mode(self: &Arc<Self>) -> ! {
         self.audit_log("—", "Перехід у режим працівника");
+        self.flush_audit();
         self.state.write().work_as_agent = true;
         self.save();
         crate::service::restart_program()
@@ -381,12 +386,19 @@ impl Node {
             action: action.to_string(),
         };
         {
-            let mut log = self.audit.lock();
-            log.push(entry.clone());
-            let _ = model::save_audit(&log);
+            self.audit.lock().push(entry.clone());
+            self.audit_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
         }
         for p in self.peers.lock().values().filter(|p| p.is_lead) {
             p.send(Msg::LogSync(vec![entry.clone()]));
+        }
+    }
+
+    /// Writing the journal gets slower as it grows, so entries are saved together every 2 seconds.
+    pub fn flush_audit(&self) {
+        if self.audit_dirty.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            let log = self.audit.lock().clone();
+            let _ = model::save_audit(&log);
         }
     }
 
@@ -681,9 +693,8 @@ impl Node {
                 if !peer.is_lead || !self.is_lead() {
                     return;
                 }
-                let mut log = self.audit.lock();
-                if model::merge_audit(&mut log, &entries) {
-                    let _ = model::save_audit(&log);
+                if model::merge_audit(&mut self.audit.lock(), &entries) {
+                    self.audit_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
             }
             other => {
@@ -938,9 +949,16 @@ impl Node {
     /// Only a running lead console sends probes, so idle agents stay silent.
     async fn probe_loop(self: Arc<Self>, socket: Arc<UdpSocket>) {
         let mut tick = tokio::time::interval(Duration::from_secs(3));
+        let mut n = 0u32;
         loop {
             tick.tick().await;
+            n += 1;
             if !self.is_lead() {
+                continue;
+            }
+            // During a session looking for other PCs is less urgent, so it happens less often.
+            let session = self.lead.lock().active.clone();
+            if n % 5 != 0 && session.is_some_and(|id| self.peer(&id).is_some()) {
                 continue;
             }
             let (key, tag) = {
@@ -961,10 +979,7 @@ impl Node {
 }
 
 async fn read_hello(recv: &mut quinn::RecvStream) -> Result<Hello> {
-    match proto::read_msg(recv).await? {
-        Some(Msg::Hello(h)) => Ok(h),
-        _ => Err(anyhow!("expected hello")),
-    }
+    proto::read_hello(recv).await
 }
 
 async fn bind_discovery(port: u16) -> Result<Arc<UdpSocket>> {
@@ -976,12 +991,13 @@ async fn bind_discovery(port: u16) -> Result<Arc<UdpSocket>> {
 
 /// Start networking on a new background runtime.
 pub fn start(identity: Identity, state: LocalState, ui: crate::agent_ui::UiHandle) -> Result<Arc<Node>> {
-    let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(3).enable_all().build()?;
+    let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(4).enable_all().build()?;
     let handle = runtime.handle().clone();
     let cfg = NetConfig::from_env();
     crate::audio::set_devices(&state.lead.mic_device, &state.lead.speaker_device);
     crate::audio::set_mic_gain(state.lead.mic_gain);
     let is_lead = state.directory.is_approved_lead(&identity.id);
+    state.directory.observe_stamps();
     let node = handle.block_on(async {
         let endpoint = net::create_endpoint(&identity, cfg.quic_port)?;
         let socket = bind_discovery(cfg.discovery_port).await?;
@@ -997,6 +1013,7 @@ pub fn start(identity: Identity, state: LocalState, ui: crate::agent_ui::UiHandl
             join_codes: Mutex::new(Vec::new()),
             add_check: Mutex::new(None),
             console_started: std::sync::atomic::AtomicU8::new(0),
+            audit_dirty: std::sync::atomic::AtomicBool::new(false),
             secure_peers: Mutex::new(HashMap::new()),
             secure_dialing: Mutex::new(HashSet::new()),
             hub: Arc::new(CaptureHub::new(false)),
@@ -1051,7 +1068,8 @@ pub fn try_join(identity: &Identity, code: &str, name: &str, rounds: u32) -> Res
                 Ok(Ok((n, _))) => {
                     if let Some(Disc::JoinOk { code_tag, id, sealed }) = net::decode_disc(&buf[..n]) {
                         if code_tag == tag && id == identity.id {
-                            let plain = secure::open_with_password(&net::normalize_code(code), &sealed)?;
+                            // A false answer from someone on the network must not end the search.
+                            let Ok(plain) = secure::open_with_password(&net::normalize_code(code), &sealed) else { continue };
                             return Ok(serde_json::from_slice(&plain)?);
                         }
                     }

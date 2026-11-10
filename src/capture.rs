@@ -193,8 +193,25 @@ fn find_output(index: u8) -> Result<(IDXGIAdapter1, IDXGIOutput)> {
     }
 }
 
-/// Desktop rectangle of each monitor: left, top, width, height.
-pub fn monitor_rects() -> Vec<(i32, i32, i32, i32)> {
+type MonitorRects = Vec<(i32, i32, i32, i32)>;
+
+static RECTS: Mutex<Option<(Instant, MonitorRects)>> = parking_lot::const_mutex(None);
+
+/// Desktop rectangle of each monitor: left, top, width, height. Asked for on every mouse
+/// movement of a lead, so the list is kept for a moment instead of being read each time.
+pub fn monitor_rects() -> MonitorRects {
+    let mut cached = RECTS.lock();
+    if let Some((at, rects)) = cached.as_ref() {
+        if at.elapsed() < Duration::from_secs(2) {
+            return rects.clone();
+        }
+    }
+    let rects = read_monitor_rects();
+    *cached = Some((Instant::now(), rects.clone()));
+    rects
+}
+
+fn read_monitor_rects() -> MonitorRects {
     let mut out = Vec::new();
     unsafe {
         let Ok(factory) = CreateDXGIFactory1::<IDXGIFactory1>() else { return out };
@@ -486,6 +503,23 @@ fn worker_loop(index: u8, monitor: &Monitor, secure: bool) {
             continue;
         }
         idle_since = None;
+        // Copying a whole screen is the expensive part, so it waits until a picture is due.
+        let now = Instant::now();
+        let mut next_due: Option<Instant> = None;
+        for p in PROFILES {
+            if monitor.pubs[&p].subs.load(Ordering::SeqCst) > 0 {
+                let due = states[&p].last.map(|l| l + p.interval()).unwrap_or(now);
+                next_due = Some(next_due.map_or(due, |d| d.min(due)));
+            } else {
+                let s = states.get_mut(&p).unwrap();
+                s.prev.clear();
+                s.last = None;
+            }
+        }
+        if let Some(due) = next_due.filter(|d| *d > now) {
+            std::thread::sleep((due - now).min(Duration::from_millis(100)));
+            continue;
+        }
         if dup.is_none() && Instant::now() >= next_duplication_try {
             if secure {
                 crate::sysutil::attach_input_desktop();
@@ -508,13 +542,17 @@ fn worker_loop(index: u8, monitor: &Monitor, secure: bool) {
                 }
             }
         }
+        let mut changed = true;
         let (w, h) = if let Some(d) = dup.as_ref() {
             let size = (d.width, d.height);
-            if let Err(e) = grab(d, &mut frame) {
-                crate::logi!("capture lost: {e}");
-                dup = None;
-                std::thread::sleep(Duration::from_millis(300));
-                continue;
+            match grab(d, &mut frame) {
+                Ok(c) => changed = c,
+                Err(e) => {
+                    crate::logi!("capture lost: {e}");
+                    dup = None;
+                    std::thread::sleep(Duration::from_millis(300));
+                    continue;
+                }
             }
             size
         } else if let Some(rect) = gdi_rect {
@@ -546,6 +584,9 @@ fn worker_loop(index: u8, monitor: &Monitor, secure: bool) {
                 continue;
             }
             s.last = Some(Instant::now());
+            if !changed && !s.prev.is_empty() {
+                continue;
+            }
             process(p, s, publisher, &frame, w, h);
         }
     }

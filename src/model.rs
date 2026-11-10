@@ -15,9 +15,25 @@ pub struct Rev {
     pub by: String,
 }
 
+/// The newest stamp this PC has seen. A new change always goes after it, so a PC whose
+/// clock runs behind does not lose its changes.
+static NEWEST_STAMP: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
 impl Rev {
     pub fn new(by: &str) -> Self {
-        Self { ts: now_ms(), by: by.to_string() }
+        use std::sync::atomic::Ordering;
+        let mut last = NEWEST_STAMP.load(Ordering::SeqCst);
+        loop {
+            let ts = (last + 1).max(now_ms());
+            match NEWEST_STAMP.compare_exchange(last, ts, Ordering::SeqCst, Ordering::SeqCst) {
+                Ok(_) => return Self { ts, by: by.to_string() },
+                Err(current) => last = current,
+            }
+        }
+    }
+
+    pub fn observe(ts: i64) {
+        NEWEST_STAMP.fetch_max(ts, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -148,6 +164,7 @@ pub struct Directory {
 fn merge_map<T: Clone>(mine: &mut BTreeMap<String, T>, other: &BTreeMap<String, T>, rev: impl Fn(&T) -> &Rev) -> bool {
     let mut changed = false;
     for (k, v) in other {
+        Rev::observe(rev(v).ts);
         let replace = match mine.get(k) {
             Some(cur) => rev(v) > rev(cur),
             None => true,
@@ -227,6 +244,7 @@ impl Directory {
         let mut changed = merge_map(&mut self.members, &other.members, |m| &m.rev);
         changed |= merge_map(&mut self.groups, &other.groups, |g| &g.rev);
         changed |= merge_map(&mut self.phrases, &other.phrases, |p| &p.rev);
+        Rev::observe(other.policy.rev.ts);
         if other.policy.rev > self.policy.rev {
             self.policy = other.policy.clone();
             changed = true;
@@ -241,6 +259,14 @@ impl Directory {
             changed = true;
         }
         changed
+    }
+
+    /// Stamps already stored here count as seen.
+    pub fn observe_stamps(&self) {
+        self.members.values().for_each(|m| Rev::observe(m.rev.ts));
+        self.groups.values().for_each(|g| Rev::observe(g.rev.ts));
+        self.phrases.values().for_each(|p| Rev::observe(p.rev.ts));
+        Rev::observe(self.policy.rev.ts);
     }
 
     /// Copy that is safe to give to an agent.
@@ -285,9 +311,13 @@ impl Directory {
     }
 
     pub fn check_lead_proof(&self, public: &[u8], proof: &[u8]) -> bool {
-        let Ok(authority) = secure::unb64(&self.authority_public_b64) else { return false };
-        secure::verify(&authority, &lead_proof_message(&self.team_id, public), proof)
+        verify_lead_proof(&self.authority_public_b64, &self.team_id, public, proof)
     }
+}
+
+pub fn verify_lead_proof(authority_b64: &str, team_id: &str, public: &[u8], proof: &[u8]) -> bool {
+    let Ok(authority) = secure::unb64(authority_b64) else { return false };
+    secure::verify(&authority, &lead_proof_message(team_id, public), proof)
 }
 
 fn lead_proof_message(team_id: &str, public: &[u8]) -> Vec<u8> {
@@ -518,6 +548,16 @@ mod tests {
         let proof = d.lead_proof(b"pk").unwrap();
         assert!(copy.check_lead_proof(b"pk", &proof));
         assert!(!copy.check_lead_proof(b"other", &proof));
+    }
+
+    #[test]
+    fn a_change_goes_after_everything_already_seen() {
+        let far = now_ms() + 3_600_000;
+        Rev::observe(far);
+        let a = Rev::new("a");
+        let b = Rev::new("b");
+        assert!(a.ts > far);
+        assert!(b.ts > a.ts);
     }
 
     #[test]

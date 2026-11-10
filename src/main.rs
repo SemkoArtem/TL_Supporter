@@ -83,7 +83,7 @@ fn watch_exit_flag() {
             if exit.exists() {
                 let request = std::fs::read(&exit).unwrap_or_default();
                 let _ = std::fs::remove_file(&exit);
-                if request == setup_ui::exit_token() {
+                if setup_ui::exit_request_valid(&request) {
                     // The service then leaves the program closed until the next sign-in.
                     std::process::exit(service::EXIT_STOPPED as i32);
                 }
@@ -150,12 +150,15 @@ fn real_main() -> Result<()> {
     if flag("--install") {
         return service::install();
     }
+    if flag("--clear-secure-pin") {
+        return secure_agent::clear_pin();
+    }
 
     let identity = Identity::load_or_create()?;
     if flag("--system-agent") {
         return secure_agent::run(identity);
     }
-    if std::env::var("TLS_DATA_DIR").is_ok() {
+    if crate::util::test_env("TLS_DATA_DIR").is_some() {
         match args.first().map(String::as_str) {
             Some("--dev-create-team") => return devtest::create_team(&identity, &args[1], &args[2]),
             Some("--dev-e2e") => return devtest::run_e2e(identity, args[1].parse()?),
@@ -164,6 +167,11 @@ fn real_main() -> Result<()> {
             Some("--dev-serve-code") => return devtest::serve_code(identity, args[1].parse()?),
             Some("--dev-employee-mode") => return devtest::employee_mode(&args[1]),
             Some("--dev-set-role") => return devtest::set_role(identity, &args[1]),
+            Some("--dev-park") => return devtest::park(identity),
+            Some("--dev-request-exit") => {
+                setup_ui::request_exit(&args[1]);
+                return Ok(());
+            }
             Some("--dev-code-wait") => return devtest::code_wait(&identity, &args[1], &args[2]),
             Some("--dev-code-add") => return devtest::code_add(identity, &args[1]),
             _ => {}
@@ -217,7 +225,7 @@ fn real_main() -> Result<()> {
         // If the prompt is declined the program still runs, just without autostart.
         if !service::is_installed()
             && !flag("--no-install")
-            && std::env::var("TLS_DATA_DIR").is_err()
+            && crate::util::test_env("TLS_DATA_DIR").is_none()
             && service::relaunch_elevated("--install")
         {
             return Ok(());

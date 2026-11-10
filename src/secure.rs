@@ -65,10 +65,19 @@ pub fn generate_join_code() -> String {
 
 /// Encrypt with DPAPI so the blob can only be opened on this PC.
 pub fn dpapi_protect(data: &[u8]) -> Result<Vec<u8>> {
+    dpapi_seal(data, CRYPTPROTECT_LOCAL_MACHINE)
+}
+
+/// Encrypt so that only this Windows account can open the blob.
+pub fn dpapi_protect_user(data: &[u8]) -> Result<Vec<u8>> {
+    dpapi_seal(data, 0)
+}
+
+fn dpapi_seal(data: &[u8], flags: u32) -> Result<Vec<u8>> {
     unsafe {
         let input = CRYPT_INTEGER_BLOB { cbData: data.len() as u32, pbData: data.as_ptr() as *mut u8 };
         let mut output = CRYPT_INTEGER_BLOB::default();
-        CryptProtectData(&input, None, None, None, None, CRYPTPROTECT_LOCAL_MACHINE, &mut output)?;
+        CryptProtectData(&input, None, None, None, None, flags, &mut output)?;
         let v = std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec();
         let _ = LocalFree(HLOCAL(output.pbData as *mut _));
         Ok(v)
@@ -76,10 +85,18 @@ pub fn dpapi_protect(data: &[u8]) -> Result<Vec<u8>> {
 }
 
 pub fn dpapi_unprotect(data: &[u8]) -> Result<Vec<u8>> {
+    dpapi_open(data, CRYPTPROTECT_LOCAL_MACHINE)
+}
+
+pub fn dpapi_unprotect_user(data: &[u8]) -> Result<Vec<u8>> {
+    dpapi_open(data, 0)
+}
+
+fn dpapi_open(data: &[u8], flags: u32) -> Result<Vec<u8>> {
     unsafe {
         let input = CRYPT_INTEGER_BLOB { cbData: data.len() as u32, pbData: data.as_ptr() as *mut u8 };
         let mut output = CRYPT_INTEGER_BLOB::default();
-        CryptUnprotectData(&input, None, None, None, None, CRYPTPROTECT_LOCAL_MACHINE, &mut output)?;
+        CryptUnprotectData(&input, None, None, None, None, flags, &mut output)?;
         let v = std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec();
         let _ = LocalFree(HLOCAL(output.pbData as *mut _));
         Ok(v)
@@ -259,6 +276,13 @@ mod tests {
     fn dpapi_roundtrip() {
         let blob = dpapi_protect(b"device").unwrap();
         assert_eq!(dpapi_unprotect(&blob).unwrap(), b"device");
+    }
+
+    #[test]
+    fn user_dpapi_roundtrip() {
+        let blob = dpapi_protect_user(b"password").unwrap();
+        assert_eq!(dpapi_unprotect_user(&blob).unwrap(), b"password");
+        assert!(dpapi_unprotect_user(b"forged").is_err());
     }
 
     #[test]

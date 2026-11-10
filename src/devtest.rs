@@ -48,6 +48,36 @@ pub fn set_role(identity: Identity, action: &str) -> Result<()> {
     std::process::exit(0);
 }
 
+/// A session out of sight stops its picture and gets it back, with control, when shown again.
+pub fn park(identity: Identity) -> Result<()> {
+    let state = model::load_state();
+    let me = identity.id.clone();
+    let (ui, rx) = UiHandle::new();
+    std::thread::spawn(move || while rx.recv().is_ok() {});
+    let node = crate::node::start(identity, state, ui)?;
+    let online = || node.state.read().directory.members.values().find(|m| m.id != me && node.peer(&m.id).is_some()).map(|m| m.id.clone());
+    wait_for(40, || online().is_some());
+    let Some(target) = online() else { bail!("no other PC came online") };
+    let watching = || node.lead.lock().targets.get(&target).is_some_and(|t| t.activity.iter().any(|a| a.id == me && a.watching));
+    let holder = || node.lead.lock().targets.get(&target).map(|t| t.control_holder.clone()).unwrap_or_default();
+    let epoch = || node.lead.lock().targets.get(&target).map(|t| t.screen.epoch).unwrap_or(0);
+    let tiles = || node.lead.lock().targets.get(&target).map(|t| t.screen.tiles.len()).unwrap_or(0);
+    node.lead_set_mode(&target, Mode { listen: false, screen: ScreenLevel::Full, monitor: 0, quality: 0, parked: false });
+    println!("WATCHING {:?}", wait_for(10, || watching()));
+    println!("FIRST_PICTURE {:?}", wait_for(10, || tiles() > 0));
+    node.lead_request_control(&target, true);
+    println!("CONTROL {:?}", wait_for(5, || holder() == me));
+    node.lead_set_parked(&target, true);
+    println!("PARKED_NOT_WATCHING {:?}", wait_for(5, || !watching()));
+    println!("PARKED_CONTROL_RELEASED {:?}", wait_for(5, || holder().is_empty()));
+    let before = epoch();
+    node.lead_set_parked(&target, false);
+    println!("BACK_WATCHING {:?}", wait_for(10, || watching()));
+    println!("BACK_NEW_PICTURE {:?}", wait_for(10, || epoch() > before && tiles() > 0));
+    println!("BACK_CONTROL {:?}", wait_for(5, || holder() == me));
+    std::process::exit(0);
+}
+
 fn wait_for(limit_secs: u64, mut check: impl FnMut() -> bool) -> Option<Duration> {
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(limit_secs) {
@@ -86,7 +116,7 @@ pub fn run_secure_e2e(identity: Identity, lock_file: &str) -> Result<()> {
     }
     println!("NORMAL_LINK {:?}", wait_for(30, || node.peer(&target).is_some()));
     println!("SECURE_LINK {:?}", wait_for(30, || node.secure_peer(&target).is_some()));
-    node.lead_set_mode(&target, Mode { listen: false, screen: ScreenLevel::Full, monitor: 0, quality: 0 });
+    node.lead_set_mode(&target, Mode { listen: false, screen: ScreenLevel::Full, monitor: 0, quality: 0, parked: false });
     let has_tiles = |n: &std::sync::Arc<crate::node::Node>| n.lead.lock().targets.get(&target).map(|t| !t.screen.tiles.is_empty()).unwrap_or(false);
     println!("NORMAL_TILES {:?}", wait_for(10, || has_tiles(&node)));
     println!("SECURE_IDLE_WHILE_UNLOCKED {}", node.lead.lock().targets[&target].secure_mode == Mode::default());
@@ -229,7 +259,7 @@ pub fn run_e2e(identity: Identity, seconds: u64) -> Result<()> {
     node.lead_set_voice_target(Some(target.clone()));
     node.lead_set_thumbs(true);
     let started = Instant::now();
-    node.lead_set_mode(&target, Mode { listen: true, screen: ScreenLevel::Full, monitor: 0, quality: 0 });
+    node.lead_set_mode(&target, Mode { listen: true, screen: ScreenLevel::Full, monitor: 0, quality: 0, parked: false });
     let mut first_image = None;
     while started.elapsed() < Duration::from_secs(8) {
         if node.lead.lock().targets.get(&target).map(|t| !t.screen.tiles.is_empty()).unwrap_or(false) {

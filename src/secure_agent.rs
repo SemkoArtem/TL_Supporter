@@ -15,6 +15,7 @@ use anyhow::{anyhow, bail, Result};
 use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::mpsc as std_mpsc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,6 +26,42 @@ use tokio::task::AbortHandle;
 enum InputCmd {
     Event(InputEv, u8),
     Sas,
+    ReleaseAll,
+}
+
+/// The team this PC belongs to, remembered where ordinary users cannot write. The team data
+/// file can be changed by anyone signed in here, so it alone cannot say who may use this process.
+#[derive(Clone)]
+struct TeamPin {
+    team_id: String,
+    authority_b64: String,
+}
+
+fn pin_path() -> Option<PathBuf> {
+    if crate::util::test_env("TLS_DATA_DIR").is_some() {
+        return Some(crate::util::data_dir().join("team.pin"));
+    }
+    let base = std::env::var("ProgramFiles").ok()?;
+    let dir = PathBuf::from(base).join("TLSupporterData");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir.join("team.pin"))
+}
+
+fn load_pin() -> Option<TeamPin> {
+    let text = std::fs::read_to_string(pin_path()?).ok()?;
+    let (team_id, authority_b64) = text.split_once('\n')?;
+    Some(TeamPin { team_id: team_id.to_string(), authority_b64: authority_b64.trim().to_string() })
+}
+
+/// Lets the next team on this PC be remembered, for example after a factory reset.
+pub fn clear_pin() -> Result<()> {
+    if !crate::service::is_admin() {
+        bail!("потрібні права адміністратора");
+    }
+    if let Some(path) = pin_path() {
+        let _ = std::fs::remove_file(path);
+    }
+    Ok(())
 }
 
 struct Link {
@@ -37,6 +74,7 @@ struct Link {
 struct Secure {
     identity: Identity,
     state: RwLock<LocalState>,
+    pin: RwLock<Option<TeamPin>>,
     hub: Arc<CaptureHub>,
     holder: Mutex<Option<String>>,
     links: Mutex<HashMap<String, Link>>,
@@ -52,6 +90,39 @@ impl Secure {
             return None;
         }
         st.directory.member(lead).map(|m| m.rights.clone()).filter(|r| r.full_access)
+    }
+
+    /// Remember the team the first time this PC has one.
+    fn refresh_pin(&self) {
+        if self.pin.read().is_some() {
+            return;
+        }
+        if let Some(pin) = load_pin() {
+            *self.pin.write() = Some(pin);
+            return;
+        }
+        let pin = {
+            let st = self.state.read();
+            if st.directory.is_empty() {
+                return;
+            }
+            TeamPin { team_id: st.directory.team_id.clone(), authority_b64: st.directory.authority_public_b64.clone() }
+        };
+        let saved = pin_path().map(|p| std::fs::write(p, format!("{}\n{}", pin.team_id, pin.authority_b64)).is_ok()).unwrap_or(false);
+        if saved {
+            crate::logi!("team remembered for secure screens");
+            *self.pin.write() = Some(pin);
+        } else {
+            crate::logi!("could not remember the team, secure screens stay closed");
+        }
+    }
+
+    /// Only someone a lead of the remembered team has vouched for gets further.
+    fn lead_is_proven(&self, hello: &Hello, public: &[u8]) -> bool {
+        let Some(pin) = self.pin.read().clone() else { return false };
+        hello.team_id == pin.team_id
+            && hello.role == Role2::Lead
+            && secure::unb64(&hello.lead_proof_b64).is_ok_and(|p| model::verify_lead_proof(&pin.authority_b64, &pin.team_id, public, &p))
     }
 
     fn broadcast_holder(&self) {
@@ -99,6 +170,7 @@ impl Secure {
                         *holder = Some(lead.to_string());
                     } else if !want && holder.as_deref() == Some(lead) {
                         *holder = None;
+                        let _ = self.input.send(InputCmd::ReleaseAll);
                     }
                 }
                 self.broadcast_holder();
@@ -138,15 +210,15 @@ impl Secure {
         let public = net::peer_public_key(&conn)?;
         let lead = secure::device_id(&public);
         let (mut send, mut recv) = conn.accept_bi().await?;
-        let hello = match proto::read_msg(&mut recv).await? {
-            Some(Msg::Hello(h)) => h,
-            _ => bail!("expected hello"),
-        };
+        let hello = proto::read_hello(&mut recv).await?;
         if hello.protocol < PROTOCOL_MIN || hello.id != lead {
             bail!("bad hello");
         }
         if hello.team_id != self.state.read().directory.team_id {
             bail!("different team");
+        }
+        if !self.lead_is_proven(&hello, &public) {
+            bail!("no proof of being a lead of this PC's team");
         }
         self.allowed(&lead).ok_or_else(|| anyhow!("lead has no full access"))?;
         send.write_all(&proto::encode(&Msg::Hello(self.make_hello()))?).await?;
@@ -183,6 +255,7 @@ impl Secure {
             let mine = holder.as_deref() == Some(&lead);
             if mine {
                 *holder = None;
+                let _ = self.input.send(InputCmd::ReleaseAll);
             }
             mine
         };
@@ -247,6 +320,7 @@ impl Secure {
             if now != last {
                 last = now;
                 *self.state.write() = model::load_state();
+                self.refresh_pin();
                 let leads: Vec<String> = self.links.lock().keys().cloned().collect();
                 for id in leads.iter().filter(|l| self.allowed(l).is_none()) {
                     if let Some(link) = self.links.lock().remove(id) {
@@ -267,13 +341,16 @@ fn input_thread(me: Arc<Secure>, rx: std_mpsc::Receiver<InputCmd>) {
     use windows::Win32::Foundation::POINT;
     use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
     let mut last: Option<(u8, f32, f32)> = None;
+    let mut held = sysutil::HeldInput::default();
     loop {
         match rx.recv_timeout(Duration::from_millis(66)) {
             Ok(cmd) => {
                 sysutil::attach_input_desktop();
                 match cmd {
                     InputCmd::Sas => sysutil::send_sas(),
+                    InputCmd::ReleaseAll => held.release_all(),
                     InputCmd::Event(ev, monitor) => {
+                        held.note(ev);
                         if let Some(rect) = capture::monitor_rects().get(monitor as usize) {
                             sysutil::inject(ev, *rect);
                         }
@@ -319,12 +396,14 @@ pub fn run(identity: Identity) -> Result<()> {
         let me = Arc::new(Secure {
             identity,
             state: RwLock::new(model::load_state()),
+            pin: RwLock::new(None),
             hub: Arc::new(CaptureHub::new(true)),
             holder: Mutex::new(None),
             links: Mutex::new(HashMap::new()),
             input,
             cfg,
         });
+        me.refresh_pin();
         let worker = me.clone();
         std::thread::spawn(move || input_thread(worker, input_rx));
         tokio::spawn(me.clone().accept_loop(endpoint));

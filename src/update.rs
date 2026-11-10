@@ -62,14 +62,15 @@ fn store_pending(version: &str, exe: &[u8], sig: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Called by the service. Returns a verified update waiting to be installed.
-pub fn pending_update() -> Option<PathBuf> {
+/// Called by the service. Returns the verified file itself: the folder is writable by every
+/// user, so whatever gets installed must be exactly the bytes that were checked.
+pub fn pending_update() -> Option<Vec<u8>> {
     let dir = update_dir();
     let exe = std::fs::read(dir.join("new.exe")).ok()?;
     let sig = std::fs::read(dir.join("new.sig")).ok()?;
     let version = std::fs::read_to_string(dir.join("new.ver")).ok()?;
     if verify_release(&version, &exe, &sig) && is_newer(&version, APP_VERSION) {
-        Some(dir.join("new.exe"))
+        Some(exe)
     } else {
         let _ = std::fs::remove_file(dir.join("new.exe"));
         None
