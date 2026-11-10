@@ -52,7 +52,7 @@ pub struct Rights {
 
 impl Default for Rights {
     fn default() -> Self {
-        Self { view: true, listen: true, draw: true, whisper: true, speak_client: true, control: true, admin: true, full_access: false }
+        Self { view: true, listen: true, draw: true, whisper: true, speak_client: true, control: true, admin: false, full_access: false }
     }
 }
 
@@ -140,6 +140,9 @@ pub struct Directory {
     pub groups: BTreeMap<String, Group>,
     pub phrases: BTreeMap<String, PhraseSet>,
     pub policy: Policy,
+    /// The PC that made the team. Only it gives or takes the administration right.
+    /// Empty in teams made before this existed, until an administrator chooses a PC.
+    pub owner_id: String,
 }
 
 fn merge_map<T: Clone>(mine: &mut BTreeMap<String, T>, other: &BTreeMap<String, T>, rev: impl Fn(&T) -> &Rev) -> bool {
@@ -166,6 +169,7 @@ impl Directory {
             team_key_b64: secure::b64(&secure::random_bytes::<32>()),
             authority_public_b64: secure::b64(&public),
             authority_private_b64: secure::b64(&private),
+            owner_id: identity.id.clone(),
             ..Default::default()
         };
         d.policy.admin_password = password_hash;
@@ -178,7 +182,7 @@ impl Directory {
                 name: lead_name.to_string(),
                 role: Role::Lead,
                 state: MemberState::Approved,
-                rights: Rights { full_access: true, ..Default::default() },
+                rights: Rights { admin: true, full_access: true, ..Default::default() },
                 rev: Rev::new(&identity.id),
                 ..Default::default()
             },
@@ -225,6 +229,11 @@ impl Directory {
         changed |= merge_map(&mut self.phrases, &other.phrases, |p| &p.rev);
         if other.policy.rev > self.policy.rev {
             self.policy = other.policy.clone();
+            changed = true;
+        }
+        // Set once. If two PCs were chosen while apart, every PC settles on the same one.
+        if !other.owner_id.is_empty() && (self.owner_id.is_empty() || other.owner_id < self.owner_id) {
+            self.owner_id = other.owner_id.clone();
             changed = true;
         }
         if self.authority_private_b64.is_empty() && !other.authority_private_b64.is_empty() {
@@ -509,6 +518,29 @@ mod tests {
         let proof = d.lead_proof(b"pk").unwrap();
         assert!(copy.check_lead_proof(b"pk", &proof));
         assert!(!copy.check_lead_proof(b"other", &proof));
+    }
+
+    #[test]
+    fn only_the_team_creator_starts_as_administrator() {
+        let id = identity(1);
+        let d = Directory::new("T", &id, "L", String::new()).unwrap();
+        assert_eq!(d.owner_id, id.id);
+        assert!(d.member(&id.id).unwrap().rights.admin);
+        assert!(!Rights::default().admin);
+    }
+
+    #[test]
+    fn main_pc_spreads_and_is_not_replaced_by_an_empty_copy() {
+        let id = identity(1);
+        let mut with = Directory::new("T", &id, "L", String::new()).unwrap();
+        let mut without = with.clone();
+        without.owner_id.clear();
+        assert!(without.merge(&with));
+        assert_eq!(without.owner_id, id.id);
+        let mut empty = with.clone();
+        empty.owner_id.clear();
+        assert!(!with.merge(&empty));
+        assert_eq!(with.owner_id, id.id);
     }
 
     #[test]

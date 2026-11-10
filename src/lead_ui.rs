@@ -62,15 +62,16 @@ struct SettingsDraft {
     confirm_employee_mode: bool,
     exit_pw: String,
     reset_pw: String,
+    role_pw: String,
+    old_admin_pw: String,
+    owner_pw: String,
+    role_error: String,
     devices: Option<(Vec<(String, String)>, Vec<(String, String)>)>,
     add_code: String,
     add_group: String,
     new_group: String,
     new_set: String,
     phrase_edit: HashMap<String, String>,
-    join_code: Option<String>,
-    join_role_lead: bool,
-    join_group: String,
     message: String,
     update_status: String,
     repo: String,
@@ -875,6 +876,9 @@ impl LeadApp {
     }
 
     fn revoke(&self, id: &str, name: &str) {
+        if self.node.state.read().directory.owner_id == id {
+            return;
+        }
         let target = id.to_string();
         self.node.update_directory(|d, me| {
             if let Some(x) = d.members.get_mut(&target) {
@@ -1621,17 +1625,37 @@ impl LeadApp {
                     self.draft.message = tr("Пароль програми змінено.").into();
                 }
                 ui.end_row();
-                ui.label(tr("Адмінський пароль команди"));
+                let (can_change, current) = {
+                    let st = self.node.state.read();
+                    (st.directory.member(&self.node.identity.id).is_some_and(|m| m.rights.admin), st.directory.policy.admin_password.clone())
+                };
+                if !can_change {
+                    ui.label(tr("Адмінський пароль команди"));
+                    ui.weak(tr("Змінити може лише керівник із правом «Адміністрування»."));
+                    ui.end_row();
+                    return;
+                }
+                ui.label(tr("Поточний адмінський пароль"));
+                theme::field(ui, &mut self.draft.old_admin_pw, "", true, 300.0);
+                ui.end_row();
+                ui.label(tr("Новий адмінський пароль"));
                 theme::field(ui, &mut self.draft.new_admin_pw, "", true, 300.0);
                 if ui.button(tr("Змінити")).clicked() && !self.draft.new_admin_pw.is_empty() {
-                    let h = secure::hash_password(&self.draft.new_admin_pw);
-                    self.draft.new_admin_pw.clear();
-                    self.node.update_directory(|d, me| {
-                        d.policy.admin_password = h;
-                        d.policy.rev = Rev::new(me);
-                    });
-                    self.node.audit_log("—", "Змінено адмінський пароль");
-                    self.draft.message = tr("Адмінський пароль змінено.").into();
+                    if !secure::check_password(&current, &self.draft.old_admin_pw) {
+                        self.draft.message = tr("Невірний адмінський пароль.").into();
+                    } else if self.draft.new_admin_pw.chars().count() < 4 {
+                        self.draft.message = tr("Пароль має бути не коротшим за 4 символи.").into();
+                    } else {
+                        let h = secure::hash_password(&self.draft.new_admin_pw);
+                        self.draft.new_admin_pw.clear();
+                        self.node.update_directory(|d, me| {
+                            d.policy.admin_password = h;
+                            d.policy.rev = Rev::new(me);
+                        });
+                        self.node.audit_log("—", "Змінено адмінський пароль");
+                        self.draft.message = tr("Адмінський пароль змінено.").into();
+                    }
+                    self.draft.old_admin_pw.clear();
                 }
                 ui.end_row();
             });
@@ -1871,27 +1895,28 @@ impl LeadApp {
     }
 
     fn settings_team(&mut self, ui: &mut egui::Ui) {
-        theme::card(ui, tr("Додати ПК"), |ui| {
-            theme::toggle(ui, &mut self.draft.join_role_lead, tr("Це ПК керівника"));
-            let opts = self.group_options();
-            let current = opts.iter().find(|o| o.0 == self.draft.join_group).map(|o| o.1.clone()).unwrap_or_default();
-            ui.horizontal(|ui| {
-                ui.label(tr("Група"));
-                egui::ComboBox::from_id_salt("join_group").selected_text(current).show_ui(ui, |ui| {
-                    for (id, name) in &opts {
-                        ui.selectable_value(&mut self.draft.join_group, id.clone(), name);
+        let (no_owner, admin, hash) = {
+            let st = self.node.state.read();
+            let admin = st.directory.member(&self.node.identity.id).is_some_and(|m| m.rights.admin);
+            (st.directory.owner_id.is_empty(), admin, st.directory.policy.admin_password.clone())
+        };
+        if no_owner && admin {
+            theme::card(ui, tr("Головний ПК"), |ui| {
+                ui.label(tr("Головний ПК ще не вибрано. Лише він зможе давати право «Адміністрування», а в інших керівників це право буде знято."));
+                ui.horizontal(|ui| {
+                    theme::field(ui, &mut self.draft.owner_pw, tr("Адмінський пароль"), true, 240.0);
+                    if ui.button(tr("Зробити цей ПК головним")).clicked() {
+                        if !self.draft.owner_pw.is_empty() && secure::check_password(&hash, &self.draft.owner_pw) {
+                            self.node.claim_main_pc();
+                            self.draft.message = tr("Збережено.").into();
+                        } else {
+                            self.draft.message = tr("Невірний адмінський пароль.").into();
+                        }
+                        self.draft.owner_pw.clear();
                     }
                 });
-                if ui.button(tr("Створити код")).clicked() {
-                    let role = if self.draft.join_role_lead { Role::Lead } else { Role::Agent };
-                    self.draft.join_code = Some(self.node.lead_create_join_code(role, self.draft.join_group.clone()));
-                }
             });
-            if let Some(code) = &self.draft.join_code {
-                ui.add_space(6.0);
-                ui.label(RichText::new(code).size(26.0).strong());
-            }
-        });
+        }
         theme::card(ui, tr("Права керівників"), |ui| self.settings_leads(ui));
     }
 
@@ -1903,8 +1928,14 @@ impl LeadApp {
         }
         let leads: Vec<model::Member> = self.node.state.read().directory.members.values().filter(|m| m.role == Role::Lead && m.state == MemberState::Approved).cloned().collect();
         let groups = self.group_options();
+        let owner = self.node.state.read().directory.owner_id.clone();
         for lead in leads {
             ui.strong(&lead.name);
+            if lead.id == owner && owner != my_id {
+                ui.weak(tr("Головний ПК"));
+                ui.add_space(8.0);
+                continue;
+            }
             let mut m = lead.clone();
             ui.horizontal_wrapped(|ui| {
                 ui.checkbox(&mut m.rights.view, tr("Екран"));
@@ -1912,7 +1943,8 @@ impl LeadApp {
                 ui.checkbox(&mut m.rights.draw, tr("Малювати"));
                 ui.checkbox(&mut m.rights.whisper, tr("Говорити працівнику"));
                 ui.checkbox(&mut m.rights.control, tr("Керування"));
-                ui.checkbox(&mut m.rights.admin, tr("Адміністрування"));
+                ui.add_enabled(owner == my_id && lead.id != my_id, egui::Checkbox::new(&mut m.rights.admin, tr("Адміністрування")))
+                    .on_disabled_hover_text(tr("Це право може дати лише головний ПК"));
                 ui.checkbox(&mut m.rights.full_access, tr("Повний доступ")).on_hover_text(tr("Екран входу, блокування, вікна адміністратора"));
             });
             ui.horizontal_wrapped(|ui| {
@@ -1963,6 +1995,7 @@ impl LeadApp {
         let opts = self.group_options();
         egui::Window::new(tr("Працівник")).collapsible(false).resizable(false).open(&mut open).show(ctx, |ui| {
             ui.label(format!("{}: {}", tr("Ключ ПК"), dlg.id));
+            let main_pc = self.node.state.read().directory.owner_id == dlg.id;
             ui.horizontal(|ui| {
                 ui.label(tr("Ім'я:"));
                 ui.add(egui::TextEdit::singleline(&mut dlg.name).desired_width(220.0));
@@ -2000,11 +2033,45 @@ impl LeadApp {
                     self.node.audit_log(&log_name, "Змінено ім'я або групу");
                     done = true;
                 }
-                if ui.button(tr("Скасувати доступ")).clicked() {
+                if ui.add_enabled(!main_pc, egui::Button::new(tr("Скасувати доступ"))).clicked() {
                     self.revoke(&dlg.id, &dlg.name);
                     done = true;
                 }
             });
+            let (can_manage, role) = {
+                let st = self.node.state.read();
+                (st.directory.member(&self.node.identity.id).is_some_and(|m| m.rights.admin), st.directory.member(&dlg.id).map(|m| m.role))
+            };
+            if can_manage && !main_pc {
+                ui.add_space(6.0);
+                ui.separator();
+                let to_lead = role == Some(Role::Agent);
+                ui.horizontal(|ui| {
+                    theme::field(ui, &mut self.draft.role_pw, tr("Адмінський пароль"), true, 190.0);
+                    let label = if to_lead { tr("Зробити керівником") } else { tr("Зробити працівником") };
+                    if ui.button(label).on_hover_text(tr("Програма на тому ПК перезапуститься")).clicked() {
+                        let admin = self.node.state.read().directory.policy.admin_password.clone();
+                        // Leads without a group are hidden from the others, so the PC would be lost from view.
+                        let no_place = to_lead && {
+                            let st = self.node.state.read();
+                            st.directory.member(&dlg.id).is_some_and(|m| m.group.is_empty()) && !st.directory.groups.values().any(|g| !g.deleted)
+                        };
+                        if no_place {
+                            self.draft.role_error = tr("Спершу створи групу для цього ПК.").into();
+                        } else if !self.draft.role_pw.is_empty() && secure::check_password(&admin, &self.draft.role_pw) {
+                            self.node.set_member_role(&dlg.id, if to_lead { Role::Lead } else { Role::Agent });
+                            self.draft.role_error.clear();
+                            done = true;
+                        } else {
+                            self.draft.role_error = tr("Невірний адмінський пароль.").into();
+                        }
+                        self.draft.role_pw.clear();
+                    }
+                });
+                if !self.draft.role_error.is_empty() {
+                    ui.colored_label(theme::danger(), &self.draft.role_error);
+                }
+            }
         });
         if open && !done {
             self.member_dialog = Some(dlg);

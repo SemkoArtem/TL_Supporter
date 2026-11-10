@@ -43,7 +43,6 @@ fn options(title: &str, w: f32, h: f32) -> eframe::NativeOptions {
 enum Mode {
     Choose,
     Create,
-    Join,
 }
 
 struct Setup {
@@ -53,7 +52,6 @@ struct Setup {
     team: String,
     password: String,
     password2: String,
-    code: String,
     error: String,
     done: std::sync::Arc<std::sync::atomic::AtomicBool>,
     own_code: String,
@@ -101,17 +99,6 @@ impl Setup {
         }
     }
 
-    fn join(&mut self, ctx: &egui::Context) {
-        if self.name.trim().is_empty() || self.code.trim().is_empty() {
-            self.error = tr("Заповни ім'я і код.").into();
-            return;
-        }
-        match node::join_with_code(&self.identity, &self.code, self.name.trim()) {
-            Ok(directory) => self.finish(LocalState { display_name: self.name.trim().to_string(), directory, ..Default::default() }, ctx),
-            Err(e) => self.error = e.to_string(),
-        }
-    }
-
 }
 
 impl eframe::App for Setup {
@@ -143,10 +130,6 @@ impl eframe::App for Setup {
                     ui.label(RichText::new(&self.own_code).size(26.0).strong());
                     ui.weak(tr("Керівник вводить цей код на головному екрані. Чекаю на підключення…"));
                     ui.add_space(8.0);
-                    if ui.button(tr("Приєднатись за кодом від керівника")).clicked() {
-                        self.mode = Mode::Join;
-                    }
-                    ui.add_space(10.0);
                     if ui.button(tr("Створити нову команду (я керівник)")).clicked() {
                         self.mode = Mode::Create;
                     }
@@ -162,19 +145,6 @@ impl eframe::App for Setup {
                     ui.horizontal(|ui| {
                         if ui.button(tr("Створити")).clicked() {
                             self.create(ctx);
-                        }
-                        if ui.button(tr("Назад")).clicked() {
-                            self.mode = Mode::Choose;
-                        }
-                    });
-                }
-                Mode::Join => {
-                    ui.label(tr("Код від керівника:"));
-                    ui.add(egui::TextEdit::singleline(&mut self.code).desired_width(f32::INFINITY));
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        if ui.button(tr("Приєднатись")).clicked() {
-                            self.join(ctx);
                         }
                         if ui.button(tr("Назад")).clicked() {
                             self.mode = Mode::Choose;
@@ -213,7 +183,6 @@ pub fn run_setup(identity: Identity) -> bool {
                 team: String::new(),
                 password: String::new(),
                 password2: String::new(),
-                code: String::new(),
                 error: String::new(),
                 done: flag,
                 own_code: code_for_ui,

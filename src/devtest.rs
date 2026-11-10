@@ -19,6 +19,35 @@ pub fn employee_mode(value: &str) -> Result<()> {
     model::save_state(&st)
 }
 
+/// Act as a lead: change the role of the first other PC once it is online.
+pub fn set_role(identity: Identity, action: &str) -> Result<()> {
+    let state = model::load_state();
+    let my_id = identity.id.clone();
+    let (ui, rx) = UiHandle::new();
+    std::thread::spawn(move || while rx.recv().is_ok() {});
+    let node = crate::node::start(identity, state, ui)?;
+    let target = |online: bool| {
+        node.state.read().directory.members.values().find(|m| m.id != my_id && (!online || node.peer(&m.id).is_some())).map(|m| m.id.clone())
+    };
+    let id = if action == "agent-off" {
+        target(false)
+    } else {
+        wait_for(40, || target(true).is_some());
+        target(true)
+    };
+    let Some(id) = id else { bail!("no other PC found") };
+    match action {
+        "lead" => node.set_member_role(&id, Role::Lead),
+        "agent" | "agent-off" => node.set_member_role(&id, Role::Agent),
+        _ => {}
+    }
+    std::thread::sleep(Duration::from_secs(5));
+    let st = node.state.read();
+    let m = st.directory.member(&id).cloned().unwrap_or_default();
+    println!("ROLE {:?} state={:?} admin={} group_set={}", m.role, m.state, m.rights.admin, !m.group.is_empty());
+    std::process::exit(0);
+}
+
 fn wait_for(limit_secs: u64, mut check: impl FnMut() -> bool) -> Option<Duration> {
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(limit_secs) {

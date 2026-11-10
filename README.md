@@ -26,7 +26,7 @@ The program is free of charge, a free license is planned for later.
 - Mouse and keyboard control that the lead turns on and off at will. Text in the clipboard is shared only while the lead controls the PC. The lead has a mixer for the employee's microphone and the computer sound, the employee can set the volume of the lead's voice or mute it.
 - Full access on the lock screen, the sign-in screen and administrator windows, as a separate right for each lead.
 - Lead rights, an action journal, console lock and auto-lock, an admin password on the employee's PC.
-- Adding a PC with a one-time code.
+- Adding a PC with a one-time code. An employee's PC can be made a lead with the team admin password. Only the main PC, the one that created the team, can give a lead the Administration right.
 - Autostart as a Windows service, the employee sees only a tray icon.
 - The close button hides the program to the tray and ends the open sessions. The minimize button keeps it on the taskbar. It closes completely only from the tray menu or settings, with the team admin password.
 - A lead's PC can switch to employee mode and back with the team admin password.
@@ -181,7 +181,7 @@ The "client hears" mode needs a signed virtual microphone driver. Its button in 
 - Керування мишею і клавіатурою, яке керівник вмикає і вимикає сам. Текст у буфері обміну спільний лише під час керування. У керівника є мікшер мікрофона працівника і звуку системи, працівник може змінити гучність голосу керівника або вимкнути його.
 - Повний доступ на екрані блокування, екрані входу і у вікнах адміністратора, окреме право для кожного керівника.
 - Права керівників, журнал дій, блокування консолі й автоблокування, адмінський пароль на ПК працівника.
-- Додавання ПК за одноразовим кодом.
+- Додавання ПК за одноразовим кодом. ПК працівника можна зробити керівником за адмінським паролем команди. Право «Адміністрування» дає лише головний ПК, той, що створив команду.
 - Автозапуск як служба Windows, у працівника лише значок у треї.
 - Хрестик ховає програму в трей і завершує відкриті сеанси. Кнопка згортання лишає її на панелі задач. Повністю вона закривається лише через меню значка в треї або налаштування, з адмінським паролем команди.
 - ПК керівника можна перевести в режим працівника і повернути назад з адмінським паролем команди.

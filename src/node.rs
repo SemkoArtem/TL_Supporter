@@ -106,6 +106,8 @@ pub struct Node {
     pub dialing: Mutex<HashSet<String>>,
     pub join_codes: Mutex<Vec<JoinCode>>,
     pub add_check: Mutex<Option<AddCheck>>,
+    /// What this process opened as: 0 not known, 1 employee's PC, 2 lead console.
+    pub console_started: std::sync::atomic::AtomicU8,
     pub secure_peers: Mutex<HashMap<String, Arc<Peer>>>,
     pub secure_dialing: Mutex<HashSet<String>>,
     pub hub: Arc<CaptureHub>,
@@ -132,7 +134,84 @@ impl Node {
         self.state.read().work_as_agent
     }
 
-    /// Reopen this PC as an employee's PC. Returning needs the team admin password.
+    /// A team made before the main PC existed: this PC becomes it, the only administrator.
+    pub fn claim_main_pc(self: &Arc<Self>) {
+        self.update_directory(|d, me| {
+            if !d.owner_id.is_empty() {
+                return;
+            }
+            let mine = me.to_string();
+            d.owner_id = mine.clone();
+            for m in d.members.values_mut() {
+                let is_me = m.id == mine;
+                if m.rights.admin != is_me {
+                    m.rights.admin = is_me;
+                    m.rev = Rev::new(&mine);
+                }
+            }
+        });
+        self.audit_log("—", "Вибрано головний ПК");
+    }
+
+    /// Make an employee's PC a lead, or a lead's PC an employee's again.
+    pub fn set_member_role(self: &Arc<Self>, id: &str, role: Role) {
+        if self.state.read().directory.owner_id == id {
+            return;
+        }
+        let target = id.to_string();
+        self.update_directory(|d, me| {
+            let first_group = d.groups.values().find(|g| !g.deleted).map(|g| g.id.clone());
+            if let Some(m) = d.members.get_mut(&target) {
+                m.role = role;
+                m.rev = Rev::new(me);
+                // Either way these two are given separately afterwards.
+                m.rights.admin = false;
+                m.rights.full_access = false;
+                // Without a group a lead's PC is hidden from the other leads.
+                if role == Role::Lead && m.group.is_empty() {
+                    m.group = first_group.unwrap_or_default();
+                }
+            }
+        });
+        let name = self.member_name(id);
+        self.audit_log(&name, if role == Role::Lead { "Зроблено керівником" } else { "Зроблено працівником" });
+    }
+
+    /// Another lead changed this PC's role: reopen the program in the new role.
+    fn follow_role_change(self: &Arc<Self>, sender: &str) {
+        use std::sync::atomic::Ordering;
+        {
+            // Employee mode belongs to leads: without this a later promotion would not open the console.
+            let mut st = self.state.write();
+            if st.role(&self.identity.id) == Some(Role::Agent) && st.work_as_agent {
+                st.work_as_agent = false;
+                st.agent_group_auto = false;
+            }
+        }
+        let started = self.console_started.load(Ordering::Relaxed);
+        if started == 0 {
+            return;
+        }
+        let console = self.state.read().console_mode(&self.identity.id);
+        if console == (started == 2) {
+            return;
+        }
+        {
+            let mut st = self.state.write();
+            if console {
+                // Whoever promoted this PC does not have to ask for permission to connect.
+                if !st.trusted_leads.iter().any(|l| l == sender) {
+                    st.trusted_leads.push(sender.to_string());
+                }
+            } else if !st.directory.is_approved_lead(&self.identity.id) {
+                st.directory.authority_private_b64.clear();
+            }
+        }
+        self.save();
+        crate::logi!("role of this PC changed, reopening the program");
+        crate::service::restart_program();
+    }
+
     pub fn factory_reset(&self) -> ! {
         // Cleared in memory too, so that no later save brings the old team back.
         *self.state.write() = LocalState::default();
@@ -267,7 +346,8 @@ impl Node {
         let full = self.state.read().directory.clone();
         let agent_copy = full.for_agent();
         for p in self.peers.lock().values() {
-            let copy = if p.is_lead { full.clone() } else { agent_copy.clone() };
+            // Asked from the team data, so a PC just made a lead gets the lead's copy at once.
+            let copy = if full.is_approved_lead(&p.id) { full.clone() } else { agent_copy.clone() };
             p.send(Msg::DirSync(Box::new(copy)));
         }
     }
@@ -447,7 +527,9 @@ impl Node {
                             .map(|p| st.directory.check_lead_proof(public, &p))
                             .unwrap_or(false);
                     if proven {
-                        added_lead = true;
+                        // A PC known here as an employee's is treated as a lead only on this
+                        // connection. The newer data then tells it, or us, what its role is.
+                        added_lead = !other.is_some_and(|m| m.role == Role::Agent && m.state == MemberState::Approved);
                         true
                     } else if other.is_none() && outgoing {
                         bail!("unknown peer");
@@ -592,6 +674,7 @@ impl Node {
                     self.save();
                     self.broadcast_directory();
                     self.on_directory_changed();
+                    self.follow_role_change(&peer.id);
                 }
             }
             Msg::LogSync(entries) => {
@@ -913,6 +996,7 @@ pub fn start(identity: Identity, state: LocalState, ui: crate::agent_ui::UiHandl
             dialing: Mutex::new(HashSet::new()),
             join_codes: Mutex::new(Vec::new()),
             add_check: Mutex::new(None),
+            console_started: std::sync::atomic::AtomicU8::new(0),
             secure_peers: Mutex::new(HashMap::new()),
             secure_dialing: Mutex::new(HashSet::new()),
             hub: Arc::new(CaptureHub::new(false)),

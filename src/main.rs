@@ -103,6 +103,11 @@ fn run_app(identity: Identity) -> Result<()> {
     let (ui_handle, rx) = agent_ui::UiHandle::new();
     let node = node::start(identity, state, ui_handle.clone())?;
     node.sync_employee_mode();
+    node.console_started.store(if is_lead { 2 } else { 1 }, std::sync::atomic::Ordering::Relaxed);
+    // The role may have changed while the network was starting.
+    if node.state.read().console_mode(&node.identity.id) != is_lead {
+        crate::service::restart_program();
+    }
     watch_exit_flag();
     if is_lead {
         let ui_node = node.clone();
@@ -158,6 +163,7 @@ fn real_main() -> Result<()> {
             Some("--dev-join") => return devtest::join(&identity, &args[1], &args[2]),
             Some("--dev-serve-code") => return devtest::serve_code(identity, args[1].parse()?),
             Some("--dev-employee-mode") => return devtest::employee_mode(&args[1]),
+            Some("--dev-set-role") => return devtest::set_role(identity, &args[1]),
             Some("--dev-code-wait") => return devtest::code_wait(&identity, &args[1], &args[2]),
             Some("--dev-code-add") => return devtest::code_add(identity, &args[1]),
             _ => {}
