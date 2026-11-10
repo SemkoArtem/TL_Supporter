@@ -105,6 +105,7 @@ fn run_app(identity: Identity) -> Result<()> {
     let node = node::start(identity, state, ui_handle.clone())?;
     node.sync_employee_mode();
     node.ensure_admin_signature();
+    node.follow_revocation();
     update::discard_stale_update();
     node.console_started.store(if is_lead { 2 } else { 1 }, std::sync::atomic::Ordering::Relaxed);
     // The role may have changed while the network was starting.

@@ -110,6 +110,10 @@ pub struct Node {
     pub console_started: std::sync::atomic::AtomicU8,
     /// The journal has entries not yet written to disk.
     audit_dirty: std::sync::atomic::AtomicBool,
+    /// This PC lost its access and is already leaving the team.
+    leaving: std::sync::atomic::AtomicBool,
+    /// PCs that lost access and were told so during this run.
+    told_revoked: Mutex<HashSet<String>>,
     pub secure_peers: Mutex<HashMap<String, Arc<Peer>>>,
     pub secure_dialing: Mutex<HashSet<String>>,
     pub hub: Arc<CaptureHub>,
@@ -352,7 +356,13 @@ impl Node {
         let agent_copy = full.for_agent();
         for p in self.peers.lock().values() {
             // Asked from the team data, so a PC just made a lead gets the lead's copy at once.
-            let copy = if full.is_approved_lead(&p.id) { full.clone() } else { agent_copy.clone() };
+            let copy = if full.is_approved_lead(&p.id) {
+                full.clone()
+            } else if full.member(&p.id).is_some_and(|m| m.state == MemberState::Revoked) {
+                full.revocation_notice(&p.id)
+            } else {
+                agent_copy.clone()
+            };
             p.send(Msg::DirSync(Box::new(copy)));
         }
     }
@@ -368,8 +378,12 @@ impl Node {
                 .cloned()
                 .collect()
         };
+        // A moment later, so that the PC first receives the news and can reset itself.
         for p in revoked {
-            p.conn.close(1u32.into(), b"revoked");
+            self.runtime.spawn(async move {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                p.conn.close(1u32.into(), b"revoked");
+            });
         }
         self.agent_reconcile();
         self.ui.send(crate::agent_ui::UiCmd::Policy(self.state.read().directory.policy.clone()));
@@ -400,6 +414,31 @@ impl Node {
 
     fn is_approved_lead_peer(&self, id: &str) -> bool {
         self.state.read().directory.is_approved_lead(id)
+    }
+
+    /// Withdraws a PC's access, signed so that its service lets it leave the team.
+    pub fn revoke_member(self: &Arc<Self>, id: &str) {
+        if self.state.read().directory.owner_id == id {
+            return;
+        }
+        let target = id.to_string();
+        self.update_directory(|d, me| d.revoke_member(&target, me));
+    }
+
+    /// This PC's access was withdrawn: it leaves the team and opens the first-run window again.
+    pub fn follow_revocation(self: &Arc<Self>) {
+        let revoked = self.state.read().directory.member(&self.identity.id).is_some_and(|m| m.state == MemberState::Revoked);
+        if !revoked || self.leaving.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        crate::logi!("access to this PC was withdrawn, leaving the team");
+        let node = self.clone();
+        std::thread::spawn(move || {
+            if !model::request_team_release(model::REVOKED_REQUEST) {
+                crate::logi!("the service did not release this PC, full access will need --clear-secure-pin");
+            }
+            node.factory_reset();
+        });
     }
 
     /// Signs the admin password if no lead has done it yet, as in teams from older versions.
@@ -593,6 +632,15 @@ impl Node {
             send.write_all(&mine).await?;
             h
         };
+        let revoked = self.is_lead() && hello.id == secure::device_id(&public) && self.state.read().directory.member(&hello.id).is_some_and(|m| m.state == MemberState::Revoked);
+        if revoked {
+            self.told_revoked.lock().insert(hello.id.clone());
+            let notice = self.state.read().directory.revocation_notice(&hello.id);
+            send.write_all(&proto::encode(&Msg::DirSync(Box::new(notice)))?).await?;
+            let _ = send.finish();
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            bail!("access revoked, the PC was told");
+        }
         let is_lead = self.admit_peer(&hello, &public, outgoing)?;
         let (tx, mut rx) = mpsc::unbounded_channel::<Msg>();
         let peer = Arc::new(Peer {
@@ -690,6 +738,7 @@ impl Node {
                     self.broadcast_directory();
                     self.on_directory_changed();
                     self.follow_role_change(&peer.id);
+                    self.follow_revocation();
                 }
             }
             Msg::LogSync(entries) => {
@@ -777,7 +826,8 @@ impl Node {
         }
         match st.directory.member(id) {
             None => false,
-            Some(m) if m.state == MemberState::Revoked => false,
+            // Once per run, to tell a PC that was off when it lost its access.
+            Some(m) if m.state == MemberState::Revoked => self.is_lead() && !self.told_revoked.lock().contains(id),
             Some(m) if m.role == Role::Lead && m.state == MemberState::Approved => self.identity.id < m.id,
             // In employee mode this PC only keeps its link with other leads.
             Some(_) => !st.work_as_agent,
@@ -1000,6 +1050,8 @@ pub fn start(identity: Identity, state: LocalState, ui: crate::agent_ui::UiHandl
             add_check: Mutex::new(None),
             console_started: std::sync::atomic::AtomicU8::new(0),
             audit_dirty: std::sync::atomic::AtomicBool::new(false),
+            leaving: std::sync::atomic::AtomicBool::new(false),
+            told_revoked: Mutex::new(HashSet::new()),
             secure_peers: Mutex::new(HashMap::new()),
             secure_dialing: Mutex::new(HashSet::new()),
             hub: Arc::new(CaptureHub::new(false)),

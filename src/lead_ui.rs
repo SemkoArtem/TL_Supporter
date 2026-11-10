@@ -900,13 +900,7 @@ impl LeadApp {
         if !self.can_revoke(id) {
             return;
         }
-        let target = id.to_string();
-        self.node.update_directory(|d, me| {
-            if let Some(x) = d.members.get_mut(&target) {
-                x.state = MemberState::Revoked;
-                x.rev = Rev::new(me);
-            }
-        });
+        self.node.revoke_member(id);
         self.node.audit_log(name, "Доступ ПК скасовано");
     }
 

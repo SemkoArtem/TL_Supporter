@@ -84,6 +84,8 @@ pub struct Member {
     pub rights: Rights,
     /// Groups a lead can work with. Empty means all groups.
     pub lead_groups: Vec<String>,
+    /// A lead's signature that this PC's access was withdrawn. The service trusts only this.
+    pub revoke_sig_b64: String,
     pub rev: Rev,
 }
 
@@ -278,6 +280,31 @@ impl Directory {
         secure::verify(&authority, &admin_message(&self.team_id, &self.policy.admin_password), &sig)
     }
 
+    /// Withdraws a PC's access. Signed when this PC holds the team key, as every lead does.
+    pub fn revoke_member(&mut self, id: &str, by: &str) {
+        let sig = secure::unb64(&self.authority_private_b64).ok().and_then(|p| secure::sign(&p, &revoke_message(&self.team_id, id)).ok());
+        if let Some(m) = self.members.get_mut(id) {
+            m.state = MemberState::Revoked;
+            m.revoke_sig_b64 = sig.map(|s| secure::b64(&s)).unwrap_or_default();
+            m.rev = Rev::new(by);
+        }
+    }
+
+    pub fn revocation_signed_by(&self, id: &str, authority_b64: &str) -> bool {
+        let Some(m) = self.member(id).filter(|m| m.state == MemberState::Revoked) else { return false };
+        let (Ok(authority), Ok(sig)) = (secure::unb64(authority_b64), secure::unb64(&m.revoke_sig_b64)) else { return false };
+        secure::verify(&authority, &revoke_message(&self.team_id, id), &sig)
+    }
+
+    /// What a PC that lost its access is told: only its own record, nothing else about the team.
+    pub fn revocation_notice(&self, id: &str) -> Directory {
+        Directory {
+            team_id: self.team_id.clone(),
+            members: self.members.get(id).map(|m| (id.to_string(), m.clone())).into_iter().collect(),
+            ..Default::default()
+        }
+    }
+
     /// Stamps already stored here count as seen.
     pub fn observe_stamps(&self) {
         self.members.values().for_each(|m| Rev::observe(m.rev.ts));
@@ -332,6 +359,10 @@ impl Directory {
     }
 }
 
+fn revoke_message(team_id: &str, id: &str) -> Vec<u8> {
+    format!("tlsupporter-revoke:{team_id}:{id}").into_bytes()
+}
+
 fn admin_message(team_id: &str, hash: &str) -> Vec<u8> {
     format!("tlsupporter-admin:{team_id}:{hash}").into_bytes()
 }
@@ -349,6 +380,19 @@ pub struct TeamPin {
 
 /// Asks the service to let this PC leave its team. Sits in the data folder only for a moment.
 pub const RESET_FILE: &str = "reset.req";
+/// Sent instead of a password when a lead has withdrawn this PC's access.
+pub const REVOKED_REQUEST: &str = "\u{1}revoked";
+
+/// Whether the service may let this PC go: the admin password, or a signed withdrawal of access.
+pub fn release_allowed(st: &LocalState, pin: &TeamPin, me: Option<&str>, request: &str) -> bool {
+    if st.directory.team_id != pin.team_id {
+        return false;
+    }
+    if request == REVOKED_REQUEST {
+        return me.is_some_and(|id| st.directory.revocation_signed_by(id, &pin.authority_b64));
+    }
+    !request.is_empty() && st.directory.admin_password_signed_by(&pin.authority_b64) && secure::check_password(&st.directory.policy.admin_password, request)
+}
 
 fn team_pin_path() -> Option<PathBuf> {
     Some(crate::util::secure_dir()?.join("team.pin"))
@@ -420,6 +464,7 @@ pub fn request_team_release(password: &str) -> bool {
 pub struct ReleaseGate {
     seen: Option<std::time::SystemTime>,
     last_try: Option<std::time::Instant>,
+    me: Option<String>,
 }
 
 /// Run by the service. Only reads the folder open to every user, trusts no password hash a lead
@@ -441,11 +486,11 @@ pub fn process_team_release(gate: &mut ReleaseGate) {
         return;
     }
     let Some(password) = std::fs::read(&path).ok().and_then(|b| secure::dpapi_unprotect(&b).ok()).and_then(|b| String::from_utf8(b).ok()) else { return };
+    if gate.me.is_none() {
+        gate.me = secure::Identity::load_existing().ok().map(|i| i.id);
+    }
     let st = load_state();
-    let genuine = !password.is_empty()
-        && st.directory.team_id == pin.team_id
-        && st.directory.admin_password_signed_by(&pin.authority_b64)
-        && secure::check_password(&st.directory.policy.admin_password, &password);
+    let genuine = release_allowed(&st, &pin, gate.me.as_deref(), &password);
     if !genuine {
         crate::logi!("request to leave the team refused");
         return;
@@ -754,6 +799,40 @@ mod tests {
         let mut forged = st.clone();
         forged.directory.policy.admin_password = secure::hash_password("attacker");
         assert!(!admin_password_accepted(&forged, Some(&pin), "attacker"));
+    }
+
+    #[test]
+    fn only_a_withdrawal_signed_by_a_lead_releases_the_pc() {
+        let id = identity(1);
+        let mut d = Directory::new("T", &id, "L", secure::hash_password("realpassword")).unwrap();
+        for pc in ["pc", "other"] {
+            d.members.insert(pc.into(), Member { id: pc.into(), state: MemberState::Approved, ..Default::default() });
+        }
+        let pin = TeamPin { team_id: d.team_id.clone(), authority_b64: d.authority_public_b64.clone(), signed: true, released: false };
+        let base = LocalState { directory: d.clone(), ..Default::default() };
+        assert!(!release_allowed(&base, &pin, Some("pc"), REVOKED_REQUEST));
+
+        let mut forged = base.clone();
+        forged.directory.members.get_mut("pc").unwrap().state = MemberState::Revoked;
+        assert!(!release_allowed(&forged, &pin, Some("pc"), REVOKED_REQUEST));
+
+        let mut revoked = base.clone();
+        revoked.directory.revoke_member("other", "lead");
+        let sig = revoked.directory.member("other").unwrap().revoke_sig_b64.clone();
+        assert!(!release_allowed(&revoked, &pin, Some("pc"), REVOKED_REQUEST));
+        forged.directory.members.get_mut("pc").unwrap().revoke_sig_b64 = sig;
+        assert!(!release_allowed(&forged, &pin, Some("pc"), REVOKED_REQUEST), "a signature for another PC does not count");
+
+        revoked.directory.revoke_member("pc", "lead");
+        assert!(release_allowed(&revoked, &pin, Some("pc"), REVOKED_REQUEST));
+        assert!(!release_allowed(&revoked, &pin, None, REVOKED_REQUEST));
+
+        let notice = revoked.directory.revocation_notice("pc");
+        assert_eq!(notice.members.len(), 1);
+        assert!(notice.policy.admin_password.is_empty() && notice.groups.is_empty());
+        let mut stale = base.clone();
+        assert!(stale.directory.merge(&notice));
+        assert!(release_allowed(&stale, &pin, Some("pc"), REVOKED_REQUEST));
     }
 
     #[test]

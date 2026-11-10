@@ -3,6 +3,7 @@
 # downloads the latest release and installs it so that it starts with Windows.
 #
 # Run it from PowerShell:   powershell -ExecutionPolicy Bypass -File .\install.ps1
+# Administrator rights are required. Without them nothing is changed.
 
 $repo      = "SemkoArtem/TL_Supporter"
 $setup     = "C:\TLSupporterSetup"
@@ -11,9 +12,16 @@ $installed = "C:\Program Files\TLSupporter\TLSupporter.exe"
 
 $identity = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
 if (-not $identity.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Write-Host "Asking for administrator rights..."
-    Start-Process powershell.exe -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
-    exit
+    # Nothing below runs without administrator rights. Windows asks for them, and on an account
+    # without them it asks for the password of an administrator.
+    Write-Host "Administrator rights are needed. Windows will ask for them now."
+    try {
+        Start-Process powershell.exe -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -ErrorAction Stop
+    } catch {
+        Write-Host "Nothing was installed: administrator rights were not given." -ForegroundColor Red
+        Read-Host "Press Enter to close"
+    }
+    exit 1
 }
 
 $ErrorActionPreference = "Stop"

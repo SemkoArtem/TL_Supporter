@@ -29,7 +29,7 @@ pub fn set_role(identity: Identity, action: &str) -> Result<()> {
     let target = |online: bool| {
         node.state.read().directory.members.values().find(|m| m.id != my_id && (!online || node.peer(&m.id).is_some())).map(|m| m.id.clone())
     };
-    let id = if action == "agent-off" {
+    let id = if action.ends_with("-off") {
         target(false)
     } else {
         wait_for(40, || target(true).is_some());
@@ -39,6 +39,7 @@ pub fn set_role(identity: Identity, action: &str) -> Result<()> {
     match action {
         "lead" => node.set_member_role(&id, Role::Lead),
         "agent" | "agent-off" => node.set_member_role(&id, Role::Agent),
+        "revoke" | "revoke-off" => node.revoke_member(&id),
         _ => {}
     }
     std::thread::sleep(Duration::from_secs(5));
