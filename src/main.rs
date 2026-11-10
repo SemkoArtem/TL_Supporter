@@ -78,6 +78,7 @@ fn watch_exit_flag() {
         let restart = util::data_dir().join(setup_ui::RESTART_FLAG);
         let _ = std::fs::remove_file(&exit);
         let _ = std::fs::remove_file(&restart);
+        let _ = std::fs::remove_file(util::data_dir().join(model::RESET_FILE));
         loop {
             std::thread::sleep(std::time::Duration::from_secs(1));
             if exit.exists() {
@@ -177,6 +178,8 @@ fn real_main() -> Result<()> {
             Some("--dev-employee-mode") => return devtest::employee_mode(&args[1]),
             Some("--dev-set-role") => return devtest::set_role(identity, &args[1]),
             Some("--dev-park") => return devtest::park(identity),
+            Some("--dev-factory-reset") => return devtest::factory_reset_request(&args[1]),
+            Some("--dev-release-worker") => return devtest::release_worker(args[1].parse()?),
             Some("--dev-request-exit") => {
                 setup_ui::request_exit(&args[1]);
                 return Ok(());

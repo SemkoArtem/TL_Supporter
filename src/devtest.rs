@@ -78,6 +78,27 @@ pub fn park(identity: Identity) -> Result<()> {
     std::process::exit(0);
 }
 
+/// The steps of a factory reset, without the window around them.
+pub fn factory_reset_request(password: &str) -> Result<()> {
+    let released = model::request_team_release(password);
+    println!("RELEASED {released}");
+    if released {
+        model::factory_reset()?;
+    }
+    Ok(())
+}
+
+/// Does what the service does for a factory reset.
+pub fn release_worker(secs: u64) -> Result<()> {
+    let mut gate = model::ReleaseGate::default();
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(secs) {
+        model::process_team_release(&mut gate);
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    Ok(())
+}
+
 fn wait_for(limit_secs: u64, mut check: impl FnMut() -> bool) -> Option<Duration> {
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(limit_secs) {

@@ -343,7 +343,12 @@ pub struct TeamPin {
     pub authority_b64: String,
     /// A validly signed admin password has been seen, so an unsigned one no longer counts.
     pub signed: bool,
+    /// Whoever knows the admin password has let this PC go, so the next team may replace this one.
+    pub released: bool,
 }
+
+/// Asks the service to let this PC leave its team. Sits in the data folder only for a moment.
+pub const RESET_FILE: &str = "reset.req";
 
 fn team_pin_path() -> Option<PathBuf> {
     Some(crate::util::secure_dir()?.join("team.pin"))
@@ -352,7 +357,10 @@ fn team_pin_path() -> Option<PathBuf> {
 pub fn load_team_pin() -> Option<TeamPin> {
     let text = std::fs::read_to_string(team_pin_path()?).ok()?;
     let mut lines = text.lines();
-    Some(TeamPin { team_id: lines.next()?.to_string(), authority_b64: lines.next()?.trim().to_string(), signed: lines.next() == Some("1") })
+    let (team_id, authority_b64) = (lines.next()?.to_string(), lines.next()?.trim().to_string());
+    let signed = lines.next() == Some("1");
+    let released = lines.next() == Some("1");
+    Some(TeamPin { team_id, authority_b64, signed, released })
 }
 
 pub fn save_team_pin(pin: &TeamPin) -> bool {
@@ -360,7 +368,8 @@ pub fn save_team_pin(pin: &TeamPin) -> bool {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    std::fs::write(path, format!("{}\n{}\n{}", pin.team_id, pin.authority_b64, if pin.signed { "1" } else { "0" })).is_ok()
+    let flag = |on: bool| if on { "1" } else { "0" };
+    std::fs::write(path, format!("{}\n{}\n{}\n{}", pin.team_id, pin.authority_b64, flag(pin.signed), flag(pin.released))).is_ok()
 }
 
 pub fn remove_team_pin() {
@@ -372,7 +381,8 @@ pub fn remove_team_pin() {
 /// The admin password check on an employee's PC. The data file can be edited by anyone signed
 /// in there, so a password hash only counts when a lead of the remembered team signed it.
 pub fn admin_password_accepted(st: &LocalState, pin: Option<&TeamPin>, password: &str) -> bool {
-    if let Some(pin) = pin {
+    // A team this PC was properly released from says nothing about the team it is in now.
+    if let Some(pin) = pin.filter(|p| !(p.released && p.team_id != st.directory.team_id)) {
         let same_team = st.directory.team_id == pin.team_id;
         let signed = same_team && st.directory.admin_password_signed_by(&pin.authority_b64);
         if !same_team || (pin.signed && !signed) {
@@ -380,6 +390,70 @@ pub fn admin_password_accepted(st: &LocalState, pin: Option<&TeamPin>, password:
         }
     }
     secure::check_password(&st.directory.policy.admin_password, password)
+}
+
+/// Called before a factory reset, while the team data still exists. The memory of the team is
+/// out of reach of this program, so the service has to confirm the password and let the PC go.
+pub fn request_team_release(password: &str) -> bool {
+    let Some(pin) = load_team_pin() else { return true };
+    if pin.released || load_state().directory.team_id != pin.team_id {
+        return true;
+    }
+    let path = data_dir().join(RESET_FILE);
+    let Ok(sealed) = secure::dpapi_protect(password.as_bytes()) else { return false };
+    if std::fs::write(&path, sealed).is_err() {
+        return false;
+    }
+    let mut released = false;
+    for _ in 0..80 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        if load_team_pin().is_some_and(|p| p.released) {
+            released = true;
+            break;
+        }
+    }
+    let _ = std::fs::remove_file(path);
+    released
+}
+
+#[derive(Default)]
+pub struct ReleaseGate {
+    seen: Option<std::time::SystemTime>,
+    last_try: Option<std::time::Instant>,
+}
+
+/// Run by the service. Only reads the folder open to every user, trusts no password hash a lead
+/// has not signed, and tries at most once in 3 seconds so that guessing stays slow.
+pub fn process_team_release(gate: &mut ReleaseGate) {
+    let path = data_dir().join(RESET_FILE);
+    let Ok(meta) = std::fs::symlink_metadata(&path) else { return };
+    if !meta.is_file() || meta.len() > 4096 {
+        return;
+    }
+    let stamp = meta.modified().ok();
+    if stamp == gate.seen || gate.last_try.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(3)) {
+        return;
+    }
+    gate.seen = stamp;
+    gate.last_try = Some(std::time::Instant::now());
+    let Some(mut pin) = load_team_pin() else { return };
+    if pin.released {
+        return;
+    }
+    let Some(password) = std::fs::read(&path).ok().and_then(|b| secure::dpapi_unprotect(&b).ok()).and_then(|b| String::from_utf8(b).ok()) else { return };
+    let st = load_state();
+    let genuine = !password.is_empty()
+        && st.directory.team_id == pin.team_id
+        && st.directory.admin_password_signed_by(&pin.authority_b64)
+        && secure::check_password(&st.directory.policy.admin_password, &password);
+    if !genuine {
+        crate::logi!("request to leave the team refused");
+        return;
+    }
+    pin.released = true;
+    if save_team_pin(&pin) {
+        crate::logi!("this PC was released from its team");
+    }
 }
 
 pub fn admin_password_ok(st: &LocalState, password: &str) -> bool {
@@ -636,7 +710,7 @@ mod tests {
         d.authority_private_b64 = secure::b64(&private);
         d.authority_public_b64 = secure::b64(&public);
         d.sign_admin_password();
-        let pin = TeamPin { team_id: d.team_id.clone(), authority_b64: d.authority_public_b64.clone(), signed: true };
+        let pin = TeamPin { team_id: d.team_id.clone(), authority_b64: d.authority_public_b64.clone(), signed: true, released: false };
         let good = LocalState { directory: d.clone(), ..Default::default() };
         assert!(admin_password_accepted(&good, Some(&pin), "realpassword"));
         assert!(!admin_password_accepted(&good, Some(&pin), "wrong"));
@@ -659,10 +733,27 @@ mod tests {
         let id = identity(1);
         let mut d = Directory::new("T", &id, "L", secure::hash_password("realpassword")).unwrap();
         d.policy.admin_sig_b64.clear();
-        let pin = TeamPin { team_id: d.team_id.clone(), authority_b64: d.authority_public_b64.clone(), signed: false };
+        let pin = TeamPin { team_id: d.team_id.clone(), authority_b64: d.authority_public_b64.clone(), signed: false, released: false };
         let st = LocalState { directory: d, ..Default::default() };
         assert!(admin_password_accepted(&st, Some(&pin), "realpassword"));
         assert!(admin_password_accepted(&st, None, "realpassword"));
+    }
+
+    #[test]
+    fn a_released_pc_can_join_another_team_but_keeps_checking_its_own() {
+        let id = identity(1);
+        let d = Directory::new("T", &id, "L", secure::hash_password("realpassword")).unwrap();
+        let mut pin = TeamPin { team_id: "previous".into(), authority_b64: d.authority_public_b64.clone(), signed: true, released: false };
+        let st = LocalState { directory: d.clone(), ..Default::default() };
+        assert!(!admin_password_accepted(&st, Some(&pin), "realpassword"));
+        pin.released = true;
+        assert!(admin_password_accepted(&st, Some(&pin), "realpassword"));
+        assert!(!admin_password_accepted(&st, Some(&pin), "wrong"));
+
+        pin.team_id = d.team_id.clone();
+        let mut forged = st.clone();
+        forged.directory.policy.admin_password = secure::hash_password("attacker");
+        assert!(!admin_password_accepted(&forged, Some(&pin), "attacker"));
     }
 
     #[test]

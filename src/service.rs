@@ -252,10 +252,12 @@ fn service_body() -> Result<()> {
     let mut system_retry = Instant::now();
     let (mut child_failures, mut system_failures) = (0u32, 0u32);
     let mut last_update_check = Instant::now();
+    let mut release_gate = crate::model::ReleaseGate::default();
     let mut updated = false;
 
     while !stop.load(Ordering::SeqCst) && !updated {
         std::thread::sleep(Duration::from_secs(1));
+        crate::model::process_team_release(&mut release_gate);
         let session = unsafe { WTSGetActiveConsoleSessionId() };
         if session == u32::MAX {
             continue;

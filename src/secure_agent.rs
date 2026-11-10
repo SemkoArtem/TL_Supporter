@@ -67,17 +67,20 @@ impl Secure {
 
     /// Remember the team the first time this PC has one.
     fn refresh_pin(&self) {
-        let known = self.pin.read().clone().or_else(model::load_team_pin);
+        // Read every time: the service may have released this PC from its team.
+        let known = model::load_team_pin();
         let next = {
             let st = self.state.read();
             let d = &st.directory;
+            let new_pin = model::TeamPin { team_id: d.team_id.clone(), authority_b64: d.authority_public_b64.clone(), signed: d.admin_password_signed_by(&d.authority_public_b64), released: false };
             match known {
+                Some(pin) if pin.released && !d.is_empty() && d.team_id != pin.team_id => new_pin,
                 Some(mut pin) => {
                     pin.signed |= d.team_id == pin.team_id && d.admin_password_signed_by(&pin.authority_b64);
                     pin
                 }
                 None if d.is_empty() => return,
-                None => model::TeamPin { team_id: d.team_id.clone(), authority_b64: d.authority_public_b64.clone(), signed: d.admin_password_signed_by(&d.authority_public_b64) },
+                None => new_pin,
             }
         };
         if self.pin.read().as_ref() == Some(&next) {

@@ -313,7 +313,13 @@ impl eframe::App for Settings {
                 if self.confirm_reset {
                     ui.label(tr("Видалити команду і всі налаштування на цьому ПК?"));
                     ui.horizontal(|ui| {
-                        if ui.button(tr("Так, скинути")).clicked() {
+                        let confirmed = ui.button(tr("Так, скинути")).clicked();
+                        let released = confirmed && model::request_team_release(&self.unlocked_with);
+                        if confirmed && !released {
+                            self.confirm_reset = false;
+                            self.message = tr("Скидання не виконано: служба не підтвердила пароль.").into();
+                        }
+                        if released {
                             let _ = model::factory_reset();
                             let _ = std::fs::write(crate::util::data_dir().join(RESTART_FLAG), b"1");
                             self.confirm_reset = false;

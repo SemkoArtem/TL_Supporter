@@ -58,6 +58,7 @@ pub fn tr<'a>(uk: &'a str) -> &'a str {
 
 const TABLE: &[(&str, &str, &str)] = &[
     ("Зробити керівником", "Make a lead", "Сделать руководителем"),
+    ("Скидання не виконано: служба не підтвердила пароль.", "The reset was not done: the service did not confirm the password.", "Сброс не выполнен: служба не подтвердила пароль."),
     ("Поточний адмінський пароль", "Current admin password", "Текущий пароль администратора"),
     ("Новий адмінський пароль", "New admin password", "Новый пароль администратора"),
     ("Пароль має бути не коротшим за 8 символів.", "The password must have at least 8 characters.", "Пароль должен быть не короче 8 символов."),

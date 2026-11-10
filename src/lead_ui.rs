@@ -1703,11 +1703,12 @@ impl LeadApp {
                     theme::field(ui, &mut self.draft.reset_pw, tr("Адмінський пароль"), true, 300.0);
                     if ui.button(tr("Скинути до заводських")).on_hover_text(tr("Видаляє команду, список ПК, журнал і налаштування на цьому ПК")).clicked() {
                         let admin = self.node.state.read().directory.policy.admin_password.clone();
-                        if !self.draft.reset_pw.is_empty() && secure::check_password(&admin, &self.draft.reset_pw) {
+                        let correct = !self.draft.reset_pw.is_empty() && secure::check_password(&admin, &self.draft.reset_pw);
+                        if correct && model::request_team_release(&self.draft.reset_pw) {
                             self.node.factory_reset();
                         }
                         self.draft.reset_pw.clear();
-                        self.draft.message = tr("Невірний адмінський пароль.").into();
+                        self.draft.message = if correct { tr("Скидання не виконано: служба не підтвердила пароль.").into() } else { tr("Невірний адмінський пароль.").into() };
                     }
                     ui.end_row();
                 });
