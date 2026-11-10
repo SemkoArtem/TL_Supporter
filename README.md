@@ -28,9 +28,9 @@ The program is free of charge, a free license is planned for later.
 - Lead rights, an action journal, console lock and auto-lock, an admin password on the employee's PC.
 - Adding a PC with a one-time code.
 - Autostart as a Windows service, the employee sees only a tray icon.
-- The close and minimize buttons hide the program to the tray, with no taskbar button. The close button also ends the open sessions. It closes completely only from the tray menu or settings, with the team admin password.
+- The close button hides the program to the tray and ends the open sessions. The minimize button keeps it on the taskbar. It closes completely only from the tray menu or settings, with the team admin password.
 - A lead's PC can switch to employee mode and back with the team admin password.
-- Dark Windows 10 style interface with a navigation pane. A light theme is available in the settings.
+- Dark interface in English, Ukrainian or Russian. A light theme is available in the settings.
 - Updates: a lead's PC downloads a signed version from GitHub and distributes it over the local network.
 
 ### How it works
@@ -106,7 +106,7 @@ The team and settings stay in `C:\ProgramData\TLSupporter`. To erase them too:
 
 #### Closing and minimizing
 
-- The window's close and minimize buttons hide the program to the tray near the clock. The icon may be under the arrow there. The taskbar button goes away.
+- The close button hides the program to the tray near the clock. The icon may be under the arrow there. The minimize button keeps it on the taskbar.
 - A left click on the icon expands the program.
 - A right click opens the menu: "Розгорнути" (expand), "Налаштування…" (settings), "Перезапустити" (restart), "Закрити програму…" (close the program). Closing asks for the team admin password, and the program then stays closed until the next Windows sign-in.
 - Ending it in Task Manager does not help: the service starts it again within a few seconds.
@@ -181,9 +181,9 @@ The "client hears" mode needs a signed virtual microphone driver. Its button in 
 - Права керівників, журнал дій, блокування консолі й автоблокування, адмінський пароль на ПК працівника.
 - Додавання ПК за одноразовим кодом.
 - Автозапуск як служба Windows, у працівника лише значок у треї.
-- Хрестик і кнопка згортання ховають програму в трей, без кнопки на панелі задач. Хрестик ще й завершує відкриті сеанси. Повністю вона закривається лише через меню значка в треї або налаштування, з адмінським паролем команди.
+- Хрестик ховає програму в трей і завершує відкриті сеанси. Кнопка згортання лишає її на панелі задач. Повністю вона закривається лише через меню значка в треї або налаштування, з адмінським паролем команди.
 - ПК керівника можна перевести в режим працівника і повернути назад з адмінським паролем команди.
-- Темний інтерфейс у стилі Windows 10 з панеллю навігації. Світла тема вмикається в налаштуваннях.
+- Темний інтерфейс англійською, українською або російською. Світла тема вмикається в налаштуваннях.
 - Оновлення: ПК керівника завантажує підписану версію з GitHub і роздає її в локальній мережі.
 
 ### Як це влаштовано
@@ -259,7 +259,7 @@ The "client hears" mode needs a signed virtual microphone driver. Its button in 
 
 #### Закриття і згортання
 
-- Хрестик і кнопка згортання ховають програму в трей біля годинника. Значок може бути під стрілкою. Кнопки на панелі задач при цьому немає.
+- Хрестик ховає програму в трей біля годинника. Значок може бути під стрілкою. Кнопка згортання лишає програму на панелі задач.
 - Лівий клік на значку розгортає програму.
 - Правий клік відкриває меню: «Розгорнути», «Налаштування…», «Перезапустити», «Закрити програму…». Закриття просить адмінський пароль команди, після цього програма не працює до наступного входу в Windows.
 - Диспетчер завдань не допоможе: служба запустить програму знову за кілька секунд.

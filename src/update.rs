@@ -136,20 +136,20 @@ fn send_update(node: &Arc<Node>, version: &str, exe: Arc<Vec<u8>>, sig: Arc<Vec<
 pub fn check_and_distribute(node: &Arc<Node>) -> String {
     let repo = node.state.read().directory.policy.update_repo.clone();
     if repo.is_empty() {
-        return "Спочатку вкажи репозиторій.".into();
+        return crate::i18n::tr("Спочатку вкажи репозиторій.").into();
     }
     match github_latest(&repo) {
-        Err(e) => format!("Не вдалося перевірити: {e}"),
-        Ok((tag, exe, _)) if exe.is_empty() => format!("Встановлено останню версію ({tag})."),
+        Err(e) => format!("{}: {e}", crate::i18n::tr("Не вдалося перевірити")),
+        Ok((tag, exe, _)) if exe.is_empty() => format!("{} ({tag}).", crate::i18n::tr("Встановлено останню версію")),
         Ok((tag, exe, sig)) => {
             if !verify_release(&tag, &exe, &sig) {
-                return "Підпис оновлення недійсний, оновлення відхилено.".into();
+                return crate::i18n::tr("Підпис оновлення недійсний, оновлення відхилено.").into();
             }
             if let Err(e) = store_pending(&tag, &exe, &sig) {
-                return format!("Не вдалося зберегти: {e}");
+                return format!("{}: {e}", crate::i18n::tr("Не вдалося зберегти"));
             }
             let n = send_update(node, &tag, Arc::new(exe), Arc::new(sig));
-            format!("Версію {tag} завантажено і розіслано на {n} ПК.")
+            format!("{tag}. {} {n}", crate::i18n::tr("Завантажено і розіслано, ПК:"))
         }
     }
 }

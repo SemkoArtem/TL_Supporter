@@ -6,6 +6,7 @@ mod agent_ui;
 mod audio;
 mod capture;
 mod devtest;
+mod i18n;
 mod lead_core;
 mod lead_ui;
 mod model;
@@ -125,6 +126,7 @@ fn run_app(identity: Identity) -> Result<()> {
 }
 
 fn real_main() -> Result<()> {
+    i18n::init();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let flag = |n: &str| args.iter().any(|a| a == n);
 
@@ -225,7 +227,7 @@ fn main() {
     if let Err(e) = real_main() {
         logi!("fatal: {e:#}");
         if !std::env::args().any(|a| a == "--service" || a == "--from-service") {
-            message(&format!("Помилка запуску: {e}"));
+            message(&format!("{}: {e}", i18n::tr("Помилка запуску")));
         }
         std::process::exit(1);
     }

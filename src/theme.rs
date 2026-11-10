@@ -1,6 +1,7 @@
 //! Windows 10 look: Segoe UI, square corners, a navigation pane and the standard blue accent.
 //! Dark by default, with a light variant in the settings.
 
+use crate::i18n::tr;
 use eframe::egui::{self, Color32, FontData, FontDefinitions, FontFamily, Margin, Pos2, Rounding, Shape, Stroke, Vec2};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -50,6 +51,31 @@ pub struct KeyView {
 }
 
 impl KeyView {
+    /// For a layout that runs from right to left.
+    pub fn show_reversed(&mut self, ui: &mut egui::Ui, key: &str) {
+        if ui.add(egui::Button::new(icon::COPY)).on_hover_text(tr("Скопіювати ключ")).clicked() {
+            ui.output_mut(|o| o.copied_text = key.to_string());
+            self.copied = Some(std::time::Instant::now());
+        }
+        let hint = if self.shown { tr("Сховати ключ") } else { tr("Показати ключ повністю") };
+        if ui.add(egui::Button::new(icon::EYE).selected(self.shown)).on_hover_text(hint).clicked() {
+            self.shown = !self.shown;
+        }
+        let text = if self.shown {
+            key.to_string()
+        } else {
+            let mut parts = key.split('-');
+            let first = parts.next().unwrap_or("");
+            parts.fold(first.to_string(), |text, _| text + "-••••")
+        };
+        ui.add(egui::Label::new(egui::RichText::new(text).strong()).selectable(self.shown));
+        ui.label(tr("Ключ цього ПК:"));
+        if self.copied.is_some_and(|t| t.elapsed().as_secs() < 2) {
+            ui.weak(tr("Скопійовано"));
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+        }
+    }
+
     pub fn show(&mut self, ui: &mut egui::Ui, key: &str) {
         let text = if self.shown {
             key.to_string()
@@ -65,16 +91,16 @@ impl KeyView {
             .size()
             .x;
         ui.add_space((full - label.rect.width()).max(0.0));
-        let hint = if self.shown { "Сховати ключ" } else { "Показати ключ повністю" };
+        let hint = if self.shown { tr("Сховати ключ") } else { tr("Показати ключ повністю") };
         if ui.add(egui::Button::new(icon::EYE).selected(self.shown)).on_hover_text(hint).clicked() {
             self.shown = !self.shown;
         }
-        if ui.button(icon::COPY).on_hover_text("Скопіювати ключ").clicked() {
+        if ui.button(icon::COPY).on_hover_text(tr("Скопіювати ключ")).clicked() {
             ui.output_mut(|o| o.copied_text = key.to_string());
             self.copied = Some(std::time::Instant::now());
         }
         if self.copied.is_some_and(|t| t.elapsed().as_secs() < 2) {
-            ui.weak("Скопійовано");
+            ui.weak(tr("Скопійовано"));
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
         }
     }
@@ -123,12 +149,12 @@ pub fn set_mode(ctx: &egui::Context, light: bool) {
     style.text_styles.insert(egui::TextStyle::Heading, egui::FontId::new(24.0, FontFamily::Name(TITLE_FONT.into())));
 
     let mut v = if light { egui::Visuals::light() } else { egui::Visuals::dark() };
-    let square = Rounding::ZERO;
-    v.window_rounding = square;
-    v.menu_rounding = square;
+    let soft = Rounding::same(4.0);
+    v.window_rounding = Rounding::same(8.0);
+    v.menu_rounding = Rounding::same(6.0);
     v.hyperlink_color = if light { ACCENT } else { Color32::from_rgb(96, 205, 255) };
     for w in [&mut v.widgets.noninteractive, &mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
-        w.rounding = square;
+        w.rounding = soft;
         w.expansion = 0.0;
     }
     if light {
@@ -194,6 +220,117 @@ pub fn danger() -> Color32 {
 
 pub fn warn_fill() -> Color32 {
     if is_light() { Color32::from_rgb(255, 244, 206) } else { Color32::from_rgb(88, 68, 0) }
+}
+
+fn card_fill() -> Color32 {
+    if is_light() { Color32::WHITE } else { Color32::from_rgb(43, 43, 43) }
+}
+
+/// A titled block of related settings or actions.
+pub fn card<R>(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let result = egui::Frame::none()
+        .fill(card_fill())
+        .rounding(8.0)
+        .stroke(Stroke::new(1.0_f32, border()))
+        .inner_margin(Margin::same(16.0))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            if !title.is_empty() {
+                ui.label(egui::RichText::new(title).size(16.0).strong());
+                ui.add_space(8.0);
+            }
+            add(ui)
+        })
+        .inner;
+    ui.add_space(10.0);
+    result
+}
+
+/// One line of the employee list.
+pub fn row_card(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
+    let frame = egui::Frame::none().rounding(8.0).inner_margin(Margin::symmetric(12.0, 8.0));
+    let fill = ui.painter().add(Shape::Noop);
+    let shown = frame.show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal(add);
+    });
+    let rect = shown.response.rect;
+    let color = if ui.rect_contains_pointer(rect) { hover_fill() } else { card_fill() };
+    ui.painter().set(fill, Shape::rect_filled(rect, 8.0, color));
+    ui.add_space(6.0);
+}
+
+/// A preview card of the thumbnail view.
+pub fn tile(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
+    egui::Frame::none().fill(card_fill()).rounding(8.0).stroke(Stroke::new(1.0_f32, border())).inner_margin(Margin::same(10.0)).show(ui, |ui| {
+        ui.vertical(add);
+    });
+}
+
+/// One message of the conversation with an employee.
+pub fn bubble(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
+    egui::Frame::none().fill(card_fill()).rounding(8.0).inner_margin(Margin::symmetric(10.0, 8.0)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        add(ui);
+    });
+    ui.add_space(6.0);
+}
+
+/// A round picture with initials and a small dot that shows whether the PC is reachable.
+pub fn avatar(ui: &mut egui::Ui, name: &str, color: [u8; 3], dot: Color32, size: f32) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), egui::Sense::click());
+    let center = rect.center();
+    ui.painter().circle_filled(center, size / 2.0, Color32::from_rgb(color[0], color[1], color[2]));
+    let initials: String = name.split_whitespace().filter_map(|w| w.chars().next()).take(2).collect::<String>().to_uppercase();
+    ui.painter().text(center, egui::Align2::CENTER_CENTER, initials, egui::FontId::proportional(size * 0.4), Color32::WHITE);
+    let at = rect.max - Vec2::splat(size * 0.14);
+    ui.painter().circle_filled(at, size * 0.2, ui.visuals().panel_fill);
+    ui.painter().circle_filled(at, size * 0.14, dot);
+    response
+}
+
+/// A square icon button of the command bar. Filled with the accent colour while it is on.
+pub fn tool_button(ui: &mut egui::Ui, glyph: &str, selected: bool, hint: &str) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(36.0, 32.0), egui::Sense::click_and_drag());
+    let enabled = ui.is_enabled();
+    if selected {
+        ui.painter().rect_filled(rect, 5.0, ACCENT);
+    } else if response.hovered() && enabled {
+        ui.painter().rect_filled(rect, 5.0, hover_fill());
+    }
+    let color = if selected {
+        Color32::WHITE
+    } else if enabled {
+        ui.visuals().strong_text_color()
+    } else {
+        ui.visuals().weak_text_color()
+    };
+    ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, glyph, egui::FontId::proportional(16.0), color);
+    if enabled {
+        response.on_hover_text(hint)
+    } else {
+        response.on_disabled_hover_text(hint)
+    }
+}
+
+/// A drop-down that looks like the icon buttons around it.
+pub fn flat_menu(ui: &mut egui::Ui, glyph: &str, hint: &str, add: impl FnOnce(&mut egui::Ui)) {
+    ui.scope(|ui| {
+        let w = &mut ui.visuals_mut().widgets;
+        w.inactive.weak_bg_fill = Color32::TRANSPARENT;
+        w.inactive.bg_stroke = Stroke::NONE;
+        ui.menu_button(glyph, add).response.on_hover_text(hint);
+    });
+}
+
+/// A thin line between groups of a command bar.
+pub fn divider(ui: &mut egui::Ui) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(11.0, 24.0), egui::Sense::hover());
+    ui.painter().vline(rect.center().x, rect.y_range(), Stroke::new(1.0_f32, border()));
+}
+
+pub fn command_frame() -> egui::Frame {
+    egui::Frame::none().fill(rail_fill()).inner_margin(Margin::symmetric(8.0, 4.0))
 }
 
 pub fn bar_frame() -> egui::Frame {

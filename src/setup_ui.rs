@@ -1,5 +1,6 @@
 //! First-run window and the simple settings window for employees.
 
+use crate::i18n::tr;
 use crate::model::{self, Directory, LocalState, MemberState, Role};
 use crate::node;
 use crate::secure::{self, Identity};
@@ -11,8 +12,8 @@ use std::sync::Arc;
 
 pub const EXIT_FLAG: &str = "exit.flag";
 pub const RESTART_FLAG: &str = "restart.flag";
-pub const SETTINGS_TITLE: &str = "Налаштування TL Supporter";
-pub const EXIT_TITLE: &str = "Закрити TL Supporter";
+pub const SETTINGS_TITLE: &str = "TL Supporter Settings";
+pub const EXIT_TITLE: &str = "Close TL Supporter";
 
 /// What the exit request must contain. The data folder is writable by every user, so an empty
 /// file must not be enough to close the program.
@@ -81,17 +82,17 @@ impl Setup {
                 self.done.store(true, std::sync::atomic::Ordering::SeqCst);
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
-            Err(e) => self.error = format!("Не вдалося зберегти: {e}"),
+            Err(e) => self.error = format!("{}: {e}", tr("Не вдалося зберегти")),
         }
     }
 
     fn create(&mut self, ctx: &egui::Context) {
         if self.name.trim().is_empty() || self.team.trim().is_empty() {
-            self.error = "Заповни ім'я і назву команди.".into();
+            self.error = tr("Заповни ім'я і назву команди.").into();
             return;
         }
         if self.password.len() < 4 || self.password != self.password2 {
-            self.error = "Паролі не збігаються або коротші за 4 символи.".into();
+            self.error = tr("Паролі не збігаються або коротші за 4 символи.").into();
             return;
         }
         match Directory::new(self.team.trim(), &self.identity, self.name.trim(), secure::hash_password(&self.password)) {
@@ -102,7 +103,7 @@ impl Setup {
 
     fn join(&mut self, ctx: &egui::Context) {
         if self.name.trim().is_empty() || self.code.trim().is_empty() {
-            self.error = "Заповни ім'я і код.".into();
+            self.error = tr("Заповни ім'я і код.").into();
             return;
         }
         match node::join_with_code(&self.identity, &self.code, self.name.trim()) {
@@ -124,53 +125,58 @@ impl eframe::App for Setup {
             self.finish(LocalState { display_name: display, directory, ..Default::default() }, ctx);
         }
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("TL Supporter");
+            ui.horizontal(|ui| {
+                ui.heading("TL Supporter");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    crate::i18n::language_picker(ui);
+                });
+            });
             ui.add_space(4.0);
-            ui.weak(format!("Ключ цього ПК: {}", self.identity.id));
+            ui.weak(format!("{}: {}", tr("Ключ цього ПК"), self.identity.id));
             ui.add_space(12.0);
-            ui.label("Твоє ім'я, як його бачитимуть інші:");
+            ui.label(tr("Твоє ім'я, як його бачитимуть інші:"));
             ui.add(egui::TextEdit::singleline(&mut self.name).desired_width(f32::INFINITY));
             ui.add_space(10.0);
             match self.mode {
                 Mode::Choose => {
-                    ui.label("Код для підключення:");
+                    ui.label(tr("Код для підключення:"));
                     ui.label(RichText::new(&self.own_code).size(26.0).strong());
-                    ui.weak("Керівник вводить цей код на головному екрані. Чекаю на підключення…");
+                    ui.weak(tr("Керівник вводить цей код на головному екрані. Чекаю на підключення…"));
                     ui.add_space(8.0);
-                    if ui.button("Приєднатись за кодом від керівника").clicked() {
+                    if ui.button(tr("Приєднатись за кодом від керівника")).clicked() {
                         self.mode = Mode::Join;
                     }
                     ui.add_space(10.0);
-                    if ui.button("Створити нову команду (я керівник)").clicked() {
+                    if ui.button(tr("Створити нову команду (я керівник)")).clicked() {
                         self.mode = Mode::Create;
                     }
                 }
                 Mode::Create => {
-                    ui.label("Назва команди:");
+                    ui.label(tr("Назва команди:"));
                     ui.add(egui::TextEdit::singleline(&mut self.team).desired_width(f32::INFINITY));
-                    ui.label("Адмінський пароль:");
+                    ui.label(tr("Адмінський пароль:"));
                     ui.add(egui::TextEdit::singleline(&mut self.password).password(true).desired_width(f32::INFINITY));
-                    ui.label("Повтори пароль:");
+                    ui.label(tr("Повтори пароль:"));
                     ui.add(egui::TextEdit::singleline(&mut self.password2).password(true).desired_width(f32::INFINITY));
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        if ui.button("Створити").clicked() {
+                        if ui.button(tr("Створити")).clicked() {
                             self.create(ctx);
                         }
-                        if ui.button("Назад").clicked() {
+                        if ui.button(tr("Назад")).clicked() {
                             self.mode = Mode::Choose;
                         }
                     });
                 }
                 Mode::Join => {
-                    ui.label("Код від керівника:");
+                    ui.label(tr("Код від керівника:"));
                     ui.add(egui::TextEdit::singleline(&mut self.code).desired_width(f32::INFINITY));
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        if ui.button("Приєднатись").clicked() {
+                        if ui.button(tr("Приєднатись")).clicked() {
                             self.join(ctx);
                         }
-                        if ui.button("Назад").clicked() {
+                        if ui.button(tr("Назад")).clicked() {
                             self.mode = Mode::Choose;
                         }
                     });
@@ -237,35 +243,43 @@ impl eframe::App for Settings {
         let st = model::load_state();
         let me = st.directory.member(&self.id).cloned().unwrap_or_default();
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("TL Supporter");
+            ui.horizontal(|ui| {
+                ui.heading("TL Supporter");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // The program itself has to reopen to pick up another language.
+                    if crate::i18n::language_picker(ui) {
+                        let _ = std::fs::write(crate::util::data_dir().join(RESTART_FLAG), b"1");
+                    }
+                });
+            });
             ui.add_space(8.0);
             egui::Grid::new("info").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
-                ui.label("Ім'я:");
+                ui.label(tr("Ім'я:"));
                 ui.strong(&me.name);
                 ui.end_row();
-                ui.label("Команда:");
+                ui.label(tr("Команда:"));
                 ui.label(&st.directory.team_name);
                 ui.end_row();
-                ui.label("Група:");
+                ui.label(tr("Група:"));
                 ui.label(st.directory.group_name(&me.group));
                 ui.end_row();
-                ui.label("Ключ ПК:");
+                ui.label(tr("Ключ ПК:"));
                 ui.horizontal(|ui| self.key.show(ui, &self.id));
                 ui.end_row();
-                ui.label("Стан:");
+                ui.label(tr("Стан:"));
                 ui.label(match me.state {
-                    MemberState::Approved => "Підключено до команди",
-                    MemberState::Pending => "Очікує підтвердження керівника",
-                    MemberState::Revoked => "Доступ скасовано",
+                    MemberState::Approved => tr("Підключено до команди"),
+                    MemberState::Pending => tr("Очікує підтвердження керівника"),
+                    MemberState::Revoked => tr("Доступ скасовано"),
                 });
                 ui.end_row();
-                ui.label("Версія:");
+                ui.label(tr("Версія:"));
                 ui.label(crate::util::APP_VERSION);
                 ui.end_row();
             });
             ui.add_space(10.0);
             egui::Grid::new("sound").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
-                ui.label("Голос керівника");
+                ui.label(tr("Голос керівника"));
                 let mut voice = self.voice * 100.0;
                 let low = crate::audio::MIN_VOICE_VOLUME * 100.0;
                 if ui.add(egui::Slider::new(&mut voice, low..=100.0).integer().suffix("%")).changed() {
@@ -273,9 +287,9 @@ impl eframe::App for Settings {
                     crate::audio::save_voice_volume(self.voice);
                 }
                 ui.end_row();
-                ui.label("Звук підключення");
+                ui.label(tr("Звук підключення"));
                 let mut chime = self.connect_sound * 100.0;
-                if ui.add(egui::Slider::new(&mut chime, 0.0..=100.0).integer().suffix("%")).on_hover_text("0% вимикає звук").changed() {
+                if ui.add(egui::Slider::new(&mut chime, 0.0..=100.0).integer().suffix("%")).on_hover_text(tr("0% вимикає звук")).changed() {
                     self.connect_sound = chime / 100.0;
                     crate::audio::save_connect_volume(self.connect_sound);
                 }
@@ -284,15 +298,15 @@ impl eframe::App for Settings {
             ui.add_space(10.0);
             ui.separator();
             if !self.unlocked {
-                ui.label("Для зміни налаштувань потрібен адмінський пароль:");
+                ui.label(tr("Для зміни налаштувань потрібен адмінський пароль:"));
                 ui.horizontal(|ui| {
                     ui.add(egui::TextEdit::singleline(&mut self.password).password(true).desired_width(200.0));
-                    if ui.button("Розблокувати").clicked() {
+                    if ui.button(tr("Розблокувати")).clicked() {
                         if secure_check(&st, &self.password) {
                             self.unlocked = true;
                             self.error.clear();
                         } else {
-                            self.error = "Невірний пароль".into();
+                            self.error = tr("Невірний пароль").into();
                         }
                         self.password.clear();
                     }
@@ -301,33 +315,33 @@ impl eframe::App for Settings {
                     ui.colored_label(theme::danger(), &self.error);
                 }
             } else {
-                ui.label(RichText::new("Адмінський режим").strong());
-                if st.role(&self.id) == Some(Role::Lead) && st.work_as_agent && ui.button("Повернутись у режим керівника").clicked() {
+                ui.label(RichText::new(tr("Адмінський режим")).strong());
+                if st.role(&self.id) == Some(Role::Lead) && st.work_as_agent && ui.button(tr("Повернутись у режим керівника")).clicked() {
                     let mut fresh = model::load_state();
                     fresh.work_as_agent = false;
                     if model::save_state(&fresh).is_ok() {
                         let _ = std::fs::write(crate::util::data_dir().join(RESTART_FLAG), b"1");
-                        self.message = "Зараз відкриється консоль керівника.".into();
+                        self.message = tr("Зараз відкриється консоль керівника.").into();
                     }
                 }
-                if ui.button("Вийти з програми до наступного входу в Windows").clicked() {
+                if ui.button(tr("Вийти з програми до наступного входу в Windows")).clicked() {
                     request_exit();
-                    self.message = "Програму буде закрито.".into();
+                    self.message = tr("Програму буде закрито.").into();
                 }
                 if self.confirm_reset {
-                    ui.label("Видалити команду і всі налаштування на цьому ПК?");
+                    ui.label(tr("Видалити команду і всі налаштування на цьому ПК?"));
                     ui.horizontal(|ui| {
-                        if ui.button("Так, скинути").clicked() {
+                        if ui.button(tr("Так, скинути")).clicked() {
                             let _ = model::factory_reset();
                             let _ = std::fs::write(crate::util::data_dir().join(RESTART_FLAG), b"1");
                             self.confirm_reset = false;
-                            self.message = "Дані скинуто, зараз відкриється початкове вікно.".into();
+                            self.message = tr("Дані скинуто, зараз відкриється початкове вікно.").into();
                         }
-                        if ui.button("Скасувати").clicked() {
+                        if ui.button(tr("Скасувати")).clicked() {
                             self.confirm_reset = false;
                         }
                     });
-                } else if ui.button("Скинути до заводських налаштувань").clicked() {
+                } else if ui.button(tr("Скинути до заводських налаштувань")).clicked() {
                     self.confirm_reset = true;
                 }
                 if !self.message.is_empty() {
@@ -351,7 +365,7 @@ struct ExitPrompt {
 impl eframe::App for ExitPrompt {
     fn update(&mut self, ctx: &egui::Context, _f: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.label("Щоб закрити програму, введи адмінський пароль команди:");
+            ui.label(tr("Щоб закрити програму, введи адмінський пароль команди:"));
             ui.add_space(6.0);
             let field = ui.add(egui::TextEdit::singleline(&mut self.password).password(true).desired_width(f32::INFINITY));
             if !self.focused {
@@ -365,8 +379,8 @@ impl eframe::App for ExitPrompt {
             ui.add_space(8.0);
             let mut close = enter;
             ui.horizontal(|ui| {
-                close |= ui.button("Закрити програму").clicked();
-                if ui.button("Скасувати").clicked() {
+                close |= ui.button(tr("Закрити програму")).clicked();
+                if ui.button(tr("Скасувати")).clicked() {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             });
@@ -375,7 +389,7 @@ impl eframe::App for ExitPrompt {
                     request_exit();
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 } else {
-                    self.error = "Невірний пароль".into();
+                    self.error = tr("Невірний пароль").into();
                     self.password.clear();
                     self.focused = false;
                 }

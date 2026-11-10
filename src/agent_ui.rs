@@ -1,17 +1,18 @@
 //! What the employee sees: drawings over all windows, a small panel and the tray icon.
 //! Both windows are hidden from screen capture and never take keyboard focus.
 
+use crate::i18n::tr;
 use crate::capture;
 use crate::model::Policy;
 use crate::node::Node;
 use crate::proto::{DrawOp, LeadActivity, Tool};
 use crate::util::wide;
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tiny_skia::{BlendMode, Color, FillRule, LineCap, LineJoin, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
+use tiny_skia::{BlendMode, IntRect, PixmapPaint, Color, FillRule, LineCap, LineJoin, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
@@ -21,7 +22,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-pub const CONSOLE_TITLE: &str = "TL Supporter — Керівник";
+pub const CONSOLE_TITLE: &str = "TL Supporter Console";
 
 const WM_WAKE: u32 = WM_APP + 1;
 const WM_TRAY: u32 = WM_APP + 2;
@@ -242,15 +243,21 @@ struct Hint {
     state: u8,
     /// While set, the hint is shown as a card that appeared at this moment.
     toast_from: Option<Instant>,
+    at: Instant,
+}
+
+#[derive(Clone, Copy)]
+struct Drag {
+    start: (i32, i32),
+    anchor: (i32, i32),
+    moved: bool,
 }
 
 #[derive(Clone)]
 enum Action {
     Ack(usize, u8),
-    OpenHistory,
     Consent(usize, bool),
     CopyHint(usize),
-    Help,
     HelpReason(String),
     HelpCancel,
     HideDrawings,
@@ -262,13 +269,21 @@ const POINTER_LIFE: Duration = Duration::from_secs(2);
 const HINT_SLIDE: Duration = Duration::from_millis(350);
 const HISTORY_ROWS: usize = 6;
 const HELP_WAIT: Duration = Duration::from_secs(60);
+const HINT_EXPIRE: Duration = Duration::from_secs(600);
+const MENU_IDLE: Duration = Duration::from_secs(6);
+const MENU_SLIDE: Duration = Duration::from_millis(160);
+const BTN: i32 = 44;
+const GAP: i32 = 6;
+const PANEL_CFG: &str = "panel.cfg";
 
 thread_local! {
     static EVENTS: RefCell<Vec<Ev>> = const { RefCell::new(Vec::new()) };
 }
 
 enum Ev {
-    PanelClick(i32, i32),
+    PanelDown,
+    PanelMove,
+    PanelUp(i32, i32),
     PanelWheel(i32),
     TrayMenu,
     TrayOpen,
@@ -288,7 +303,19 @@ unsafe extern "system" fn panel_proc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> L
         WM_LBUTTONUP => {
             let x = (l.0 & 0xFFFF) as i16 as i32;
             let y = ((l.0 >> 16) & 0xFFFF) as i16 as i32;
-            push_event(Ev::PanelClick(x, y));
+            let _ = ReleaseCapture();
+            push_event(Ev::PanelUp(x, y));
+            LRESULT(0)
+        }
+        WM_LBUTTONDOWN => {
+            SetCapture(h);
+            push_event(Ev::PanelDown);
+            LRESULT(0)
+        }
+        WM_MOUSEMOVE => {
+            if GetCapture() == h {
+                push_event(Ev::PanelMove);
+            }
             LRESULT(0)
         }
         WM_MOUSEWHEEL => {
@@ -463,23 +490,6 @@ pub fn console_visible() -> bool {
     own_console_window().map(|h| unsafe { IsWindowVisible(h).as_bool() && !IsIconic(h).as_bool() }).unwrap_or(false)
 }
 
-/// A taskbar button is shown on purpose while a help request is waiting to be noticed.
-static ATTENTION: AtomicBool = AtomicBool::new(false);
-
-/// Was the console just minimized, so that it should move to the tray?
-pub fn console_wants_tray() -> bool {
-    let Some(h) = own_console_window() else { return false };
-    unsafe {
-        let visible = IsWindowVisible(h).as_bool();
-        if !IsIconic(h).as_bool() {
-            if visible {
-                ATTENTION.store(false, Ordering::SeqCst);
-            }
-            return false;
-        }
-        visible && !ATTENTION.load(Ordering::SeqCst)
-    }
-}
 
 /// Blink the console button on the taskbar without taking the lead away from what they do.
 pub fn flash_console_window() {
@@ -488,7 +498,6 @@ pub fn flash_console_window() {
         if let Ok(h) = FindWindowW(None, PCWSTR(title.as_ptr())) {
             // A console hidden in the tray has no taskbar button to blink, so give it one.
             if !IsWindowVisible(h).as_bool() {
-                ATTENTION.store(true, Ordering::SeqCst);
                 let _ = ShowWindow(h, SW_SHOWMINNOACTIVE);
             }
             let info = FLASHWINFO {
@@ -531,7 +540,14 @@ struct Ui {
     overlays: Vec<Overlay>,
     items: Vec<DrawItem>,
     hints: Vec<Hint>,
-    history_open: bool,
+    menu_open: bool,
+    menu_progress: f32,
+    menu_touch: Instant,
+    last_tick: Instant,
+    anchor: Option<(i32, i32)>,
+    drag: Option<Drag>,
+    button_at: Option<(i32, i32)>,
+    content_area: Option<(i32, i32, i32, i32)>,
     history_top: usize,
     consent: Vec<(String, String)>,
     pointers: Vec<PointerMark>,
@@ -544,7 +560,6 @@ struct Ui {
     activity: Vec<LeadActivity>,
     policy: Policy,
     font: Option<Font>,
-    help_menu: bool,
     help_waiting: bool,
     help_since: Option<Instant>,
     status: Option<(String, Instant)>,
@@ -613,11 +628,11 @@ impl Ui {
                 self.panel_dirty = true;
             }
             UiCmd::Hint { lead, name, color, id, text } => {
-                let open = self.history_open;
+                let open = self.menu_open;
                 if open {
                     self.node.agent_hint_ack(&lead, id, 1);
                 }
-                self.hints.push(Hint { lead, name, color, id, text, state: u8::from(open), toast_from: (!open).then(Instant::now) });
+                self.hints.push(Hint { lead, name, color, id, text, state: u8::from(open), toast_from: (!open).then(Instant::now), at: Instant::now() });
                 if self.hints.len() > 300 {
                     self.hints.remove(0);
                 }
@@ -637,21 +652,21 @@ impl Ui {
             UiCmd::Tap { color, monitor, x, y } => self.taps.push(TapMark { color, monitor, x, y, start: Instant::now() }),
             UiCmd::HelpTaken(name) => {
                 self.help_waiting = false;
-                self.status = Some((format!("{name} іде на допомогу"), Instant::now()));
+                self.status = Some((format!("{name}: {}", tr("іде на допомогу")), Instant::now()));
                 self.panel_dirty = true;
             }
             UiCmd::HelpSent => {
                 self.help_waiting = true;
                 self.help_since = Some(Instant::now());
-                self.status = Some(("Запит надіслано".into(), Instant::now()));
+                self.status = Some((tr("Запит надіслано").into(), Instant::now()));
                 self.panel_dirty = true;
             }
             UiCmd::HelpNoLeads => {
-                self.status = Some(("Немає керівників онлайн".into(), Instant::now()));
+                self.status = Some((tr("Немає керівників онлайн").into(), Instant::now()));
                 self.panel_dirty = true;
             }
             UiCmd::HelpIncoming(name) => {
-                self.balloon("Потрібна допомога", &name);
+                self.balloon(tr("Потрібна допомога"), &name);
                 flash_console_window();
             }
             UiCmd::Quiet(on) => {
@@ -822,15 +837,29 @@ impl Ui {
             }
         }
         let Some(font) = self.font.take() else { return };
+        let now = Instant::now();
+        let hold = self.hint_hold();
+        let show_button = !self.is_lead_pc && (self.policy.show_help_button || !self.hints.is_empty());
+        let rects = capture::monitor_rects();
+        let primary = rects.iter().find(|r| r.0 == 0 && r.1 == 0).or(rects.first()).copied().unwrap_or((0, 0, 1920, 1080));
+        let (ax, ay) = self.anchor.unwrap_or((primary.0 + primary.2 - BTN - 8, primary.1 + primary.3 * 3 / 4));
+        let area = rects
+            .iter()
+            .find(|r| ax + BTN / 2 >= r.0 && ax + BTN / 2 < r.0 + r.2 && ay + BTN / 2 >= r.1 && ay + BTN / 2 < r.1 + r.3)
+            .copied()
+            .unwrap_or(primary);
+        let (ax, ay) = (ax.clamp(area.0, area.0 + area.2 - BTN), ay.clamp(area.1, area.1 + area.3 - BTN));
+        self.anchor = Some((ax, ay));
+        let right = ax + BTN / 2 > area.0 + area.2 / 2;
+        let lower = ay + BTN / 2 > area.1 + area.3 / 2;
+
         let body = 14.0;
         let wrap_w = PANEL_W as f32 - 40.0;
         let activity = self.visible_activity();
-        let mut height = 0.0f32;
         let hint_lines: Vec<Vec<String>> = self.hints.iter().map(|h| font.wrap(&h.text, body, wrap_w)).collect();
-        let now = Instant::now();
-        let hold = self.hint_hold();
-        // Cards still on screen, with how far each has already slid away.
-        let toasts: Vec<(usize, f32)> = if self.history_open {
+        let menu = self.menu_open || self.menu_progress > 0.0;
+        // Cards still on screen, with how far each has already slid towards the button.
+        let toasts: Vec<(usize, f32)> = if menu {
             Vec::new()
         } else {
             self.hints
@@ -848,37 +877,43 @@ impl Ui {
             end.saturating_sub(HISTORY_ROWS)..end
         };
         let row_h = |lines: usize, state: u8| 30.0 + lines as f32 * 19.0 + if state <= 1 { 26.0 } else { 0.0 } + 4.0;
-        height += self.consent.len() as f32 * 72.0;
+        let can_ask = self.policy.show_help_button && !self.is_lead_pc;
+        let reasons: Vec<(String, String)> = if can_ask && !self.help_waiting {
+            let mut list = vec![(tr("Допоможіть").to_string(), String::new())];
+            list.extend(self.policy.help_reasons.iter().map(|r| (r.clone(), r.clone())));
+            list
+        } else {
+            Vec::new()
+        };
+        let can_hide = !self.items.is_empty() && self.policy.allow_hide_key || self.hidden_until.is_some();
+
+        let mut height = self.consent.len() as f32 * 72.0;
         for (i, _) in &toasts {
             height += 62.0 + hint_lines[*i].len() as f32 * 19.0 + 6.0;
-        }
-        if self.history_open {
-            height += 30.0;
-            for i in history_range.clone() {
-                height += row_h(hint_lines[i].len(), self.hints[i].state);
-            }
-        }
-        if !self.hints.is_empty() {
-            height += 32.0;
         }
         if self.status.is_some() {
             height += 36.0;
         }
-        height += activity.len() as f32 * 30.0;
-        if !self.items.is_empty() && self.policy.allow_hide_key || self.hidden_until.is_some() {
-            height += 32.0;
+        if menu {
+            height += 30.0;
+            if self.hints.is_empty() {
+                height += 32.0;
+            }
+            for i in history_range.clone() {
+                height += row_h(hint_lines[i].len(), self.hints[i].state);
+            }
+            height += activity.len() as f32 * 30.0;
+            if can_hide {
+                height += 32.0;
+            }
+            if self.help_waiting {
+                height += 32.0;
+            }
+            height += reasons.len() as f32 * 32.0;
         }
-        if self.help_menu {
-            height += (self.policy.help_reasons.len() as f32 + 1.0) * 32.0;
-        }
-        if self.help_waiting {
-            height += 32.0;
-        }
-        let show_button = self.policy.show_help_button && !self.is_lead_pc;
-        if show_button {
-            height += 44.0;
-        }
-        if height <= 0.0 {
+
+        if height <= 0.0 && !show_button {
+            self.toast_area.clear();
             if self.panel_visible {
                 unsafe {
                     let _ = ShowWindow(self.panel_hwnd, SW_HIDE);
@@ -888,155 +923,183 @@ impl Ui {
             self.font = Some(font);
             return;
         }
-        let h = height.ceil() as i32 + 2;
-        let Some(mut pix) = Pixmap::new(PANEL_W as u32, h as u32) else {
-            self.font = Some(font);
-            return;
-        };
+
         self.actions.clear();
-        let mut y = 0.0f32;
+        self.toast_area.clear();
         let mut paint = Paint::default();
         paint.anti_alias = true;
         let fill = |pix: &mut Pixmap, paint: &mut Paint, r: Rect, c: [u8; 4]| {
             paint.set_color_rgba8(c[0], c[1], c[2], c[3]);
             pix.fill_rect(r, paint, Transform::identity(), None);
         };
-        for (i, (_, name)) in self.consent.iter().enumerate() {
-            fill(&mut pix, &mut paint, Rect::from_xywh(0.0, y, PANEL_W as f32, 66.0).unwrap(), [31, 31, 31, 250]);
-            fill(&mut pix, &mut paint, Rect::from_xywh(0.0, y, 5.0, 66.0).unwrap(), [0, 120, 215, 255]);
-            font.draw(&mut pix, &format!("{name} хоче підключитись"), 15.0, y + 22.0, 13.0, [242, 242, 242]);
-            font.draw(&mut pix, "Дозволити", 15.0, y + 52.0, 13.0, [108, 203, 95]);
-            self.actions.push((Rect::from_xywh(10.0, y + 36.0, 90.0, 26.0).unwrap(), Action::Consent(i, true)));
-            font.draw(&mut pix, "Відмовити", 120.0, y + 52.0, 13.0, [255, 120, 130]);
-            self.actions.push((Rect::from_xywh(115.0, y + 36.0, 90.0, 26.0).unwrap(), Action::Consent(i, false)));
-            y += 72.0;
-        }
-        self.toast_area.clear();
-        for (i, offset) in &toasts {
-            let (i, x0) = (*i, *offset);
-            let hint = &self.hints[i];
-            let lines = &hint_lines[i];
-            let box_h = 62.0 + lines.len() as f32 * 19.0;
-            self.toast_area.push((y, box_h));
-            let bg = Rect::from_xywh(x0, y, PANEL_W as f32, box_h).unwrap();
-            fill(&mut pix, &mut paint, bg, [31, 31, 31, 245]);
-            let c = hint.color;
-            fill(&mut pix, &mut paint, Rect::from_xywh(x0, y, 5.0, box_h).unwrap(), [c[0], c[1], c[2], 255]);
-            font.draw(&mut pix, &hint.name, x0 + 15.0, y + 20.0, 13.0, c);
-            for (n, line) in lines.iter().enumerate() {
-                font.draw(&mut pix, line, x0 + 15.0, y + 40.0 + n as f32 * 19.0, body, [242, 242, 242]);
+        let content_h = height.ceil() as i32;
+        let mut content = if content_h > 0 { Pixmap::new(PANEL_W as u32, content_h as u32) } else { None };
+        let slide_dir = if right { 1.0 } else { -1.0 };
+        let mut card_tops: Vec<(f32, f32)> = Vec::new();
+        if let Some(pix) = content.as_mut() {
+            let mut y = 0.0f32;
+            for (i, (_, name)) in self.consent.iter().enumerate() {
+                fill(pix, &mut paint, Rect::from_xywh(0.0, y, PANEL_W as f32, 66.0).unwrap(), [31, 31, 31, 250]);
+                fill(pix, &mut paint, Rect::from_xywh(0.0, y, 5.0, 66.0).unwrap(), [0, 120, 215, 255]);
+                font.draw(pix, &format!("{name}: {}", tr("хоче підключитись")), 15.0, y + 22.0, 13.0, [242, 242, 242]);
+                font.draw(pix, tr("Дозволити"), 15.0, y + 52.0, 13.0, [108, 203, 95]);
+                self.actions.push((Rect::from_xywh(10.0, y + 36.0, 90.0, 26.0).unwrap(), Action::Consent(i, true)));
+                font.draw(pix, tr("Відмовити"), 120.0, y + 52.0, 13.0, [255, 120, 130]);
+                self.actions.push((Rect::from_xywh(115.0, y + 36.0, 90.0, 26.0).unwrap(), Action::Consent(i, false)));
+                y += 72.0;
             }
-            draw_ack_row(&font, &mut pix, &mut self.actions, x0, y + box_h - 24.0, i);
-            y += box_h + 6.0;
-        }
-        if self.history_open {
-            fill(&mut pix, &mut paint, Rect::from_xywh(0.0, y, PANEL_W as f32, 30.0).unwrap(), [51, 51, 51, 250]);
-            font.draw(&mut pix, "Історія", 12.0, y + 20.0, 13.0, [242, 242, 242]);
-            if self.hints.len() > HISTORY_ROWS {
-                font.draw(&mut pix, "коліщатком вгору: старіші", 118.0, y + 20.0, 11.0, [170, 170, 170]);
-            }
-            y += 30.0;
-            for i in history_range {
+            for (i, offset) in &toasts {
+                let (i, x0) = (*i, *offset * slide_dir);
                 let hint = &self.hints[i];
                 let lines = &hint_lines[i];
-                let box_h = row_h(lines.len(), hint.state) - 4.0;
-                fill(&mut pix, &mut paint, Rect::from_xywh(0.0, y, PANEL_W as f32, box_h).unwrap(), [31, 31, 31, 250]);
+                let box_h = 62.0 + lines.len() as f32 * 19.0;
+                card_tops.push((y, box_h));
+                fill(pix, &mut paint, Rect::from_xywh(x0, y, PANEL_W as f32, box_h).unwrap(), [31, 31, 31, 245]);
                 let c = hint.color;
-                fill(&mut pix, &mut paint, Rect::from_xywh(0.0, y, 5.0, box_h).unwrap(), [c[0], c[1], c[2], 255]);
-                font.draw(&mut pix, &hint.name, 15.0, y + 20.0, 13.0, c);
-                let (label, color) = match hint.state {
-                    0 => ("Нове", [255, 120, 130]),
-                    2 => ("Прийнято", [108, 203, 95]),
-                    3 => ("Відхилено", [255, 120, 130]),
-                    4 => ("Ігнор", [170, 170, 170]),
-                    _ => ("Прочитано", [170, 170, 170]),
-                };
-                let tw = font.width(label, 12.0);
-                font.draw(&mut pix, label, PANEL_W as f32 - tw - 10.0, y + 20.0, 12.0, color);
+                fill(pix, &mut paint, Rect::from_xywh(x0, y, 5.0, box_h).unwrap(), [c[0], c[1], c[2], 255]);
+                font.draw(pix, &hint.name, x0 + 15.0, y + 20.0, 13.0, c);
                 for (n, line) in lines.iter().enumerate() {
-                    font.draw(&mut pix, line, 15.0, y + 40.0 + n as f32 * 19.0, body, [242, 242, 242]);
+                    font.draw(pix, line, x0 + 15.0, y + 40.0 + n as f32 * 19.0, body, [242, 242, 242]);
                 }
-                if hint.state <= 1 {
-                    draw_ack_row(&font, &mut pix, &mut self.actions, 0.0, y + box_h - 24.0, i);
+                draw_ack_row(&font, pix, &mut self.actions, x0, y + box_h - 24.0, i);
+                y += box_h + 6.0;
+            }
+            if let Some((text, _)) = &self.status {
+                fill(pix, &mut paint, Rect::from_xywh(0.0, y, PANEL_W as f32, 32.0).unwrap(), [30, 30, 30, 235]);
+                font.draw(pix, text, 12.0, y + 21.0, 13.0, [255, 255, 255]);
+                y += 36.0;
+            }
+            if menu {
+                fill(pix, &mut paint, Rect::from_xywh(0.0, y, PANEL_W as f32, 30.0).unwrap(), [51, 51, 51, 250]);
+                font.draw(pix, tr("Історія"), 12.0, y + 20.0, 13.0, [242, 242, 242]);
+                y += 30.0;
+                if self.hints.is_empty() {
+                    fill(pix, &mut paint, Rect::from_xywh(0.0, y, PANEL_W as f32, 32.0).unwrap(), [31, 31, 31, 250]);
+                    font.draw(pix, tr("Підказок ще не було"), 12.0, y + 21.0, 13.0, [170, 170, 170]);
+                    y += 32.0;
                 }
-                y += box_h + 4.0;
+                for i in history_range {
+                    let hint = &self.hints[i];
+                    let lines = &hint_lines[i];
+                    let box_h = row_h(lines.len(), hint.state) - 4.0;
+                    fill(pix, &mut paint, Rect::from_xywh(0.0, y, PANEL_W as f32, box_h).unwrap(), [31, 31, 31, 250]);
+                    let c = hint.color;
+                    fill(pix, &mut paint, Rect::from_xywh(0.0, y, 5.0, box_h).unwrap(), [c[0], c[1], c[2], 255]);
+                    font.draw(pix, &hint.name, 15.0, y + 20.0, 13.0, c);
+                    let (label, color) = match hint.state {
+                        0 => (tr("Нове"), [255, 120, 130]),
+                        2 => (tr("Прийнято"), [108, 203, 95]),
+                        3 => (tr("Відхилено"), [255, 120, 130]),
+                        4 => (tr("Ігнор"), [170, 170, 170]),
+                        _ => (tr("Прочитано"), [170, 170, 170]),
+                    };
+                    let tw = font.width(label, 12.0);
+                    font.draw(pix, label, PANEL_W as f32 - tw - 10.0, y + 20.0, 12.0, color);
+                    for (n, line) in lines.iter().enumerate() {
+                        font.draw(pix, line, 15.0, y + 40.0 + n as f32 * 19.0, body, [242, 242, 242]);
+                    }
+                    if hint.state <= 1 {
+                        draw_ack_row(&font, pix, &mut self.actions, 0.0, y + box_h - 24.0, i);
+                    }
+                    y += box_h + 4.0;
+                }
+                for a in &activity {
+                    let c = crate::util::color_for(&a.id);
+                    fill(pix, &mut paint, Rect::from_xywh(0.0, y, PANEL_W as f32, 28.0).unwrap(), [31, 31, 31, 235]);
+                    fill(pix, &mut paint, Rect::from_xywh(0.0, y, 5.0, 28.0).unwrap(), [c[0], c[1], c[2], 255]);
+                    let verb = if a.controlling {
+                        tr("керує")
+                    } else if a.speaking {
+                        tr("говорить")
+                    } else {
+                        tr("малює")
+                    };
+                    font.draw(pix, &format!("{}: {verb}", a.name), 14.0, y + 19.0, 13.0, [242, 242, 242]);
+                    y += 30.0;
+                }
+                if can_hide {
+                    let label = if self.hidden_until.is_some() { tr("Показати малюнки") } else { tr("Сховати малюнки") };
+                    fill(pix, &mut paint, Rect::from_xywh(0.0, y, PANEL_W as f32, 28.0).unwrap(), [51, 51, 51, 245]);
+                    font.draw(pix, label, 12.0, y + 19.0, 13.0, [242, 242, 242]);
+                    self.actions.push((Rect::from_xywh(0.0, y, PANEL_W as f32, 28.0).unwrap(), Action::HideDrawings));
+                    y += 32.0;
+                }
+                if self.help_waiting {
+                    fill(pix, &mut paint, Rect::from_xywh(0.0, y, PANEL_W as f32, 28.0).unwrap(), [51, 51, 51, 245]);
+                    font.draw(pix, tr("Скасувати запит"), 12.0, y + 19.0, 13.0, [242, 242, 242]);
+                    self.actions.push((Rect::from_xywh(0.0, y, PANEL_W as f32, 28.0).unwrap(), Action::HelpCancel));
+                    y += 32.0;
+                }
+                for (n, (label, reason)) in reasons.iter().enumerate() {
+                    let tone = if n == 0 { [0, 120, 215, 245] } else { [51, 51, 51, 245] };
+                    fill(pix, &mut paint, Rect::from_xywh(0.0, y, PANEL_W as f32, 30.0).unwrap(), tone);
+                    font.draw(pix, label, 12.0, y + 20.0, 13.0, [242, 242, 242]);
+                    self.actions.push((Rect::from_xywh(0.0, y, PANEL_W as f32, 30.0).unwrap(), Action::HelpReason(reason.clone())));
+                    y += 32.0;
+                }
+            }
+            let _ = y;
+        }
+
+        // The window holds the round button and, beside it, whatever is open.
+        let has_content = content.is_some();
+        let total_w = if has_content { BTN + GAP + PANEL_W } else { BTN };
+        let total_h = content_h.max(BTN);
+        let Some(mut pix) = Pixmap::new(total_w as u32, total_h as u32) else {
+            self.font = Some(font);
+            return;
+        };
+        let bx = if right { total_w - BTN } else { 0 };
+        let by = if lower { total_h - BTN } else { 0 };
+        let visible = if menu { ((PANEL_W as f32 * self.menu_progress).round() as i32).max(1) } else { PANEL_W };
+        let cx = if right { total_w - BTN - GAP - visible } else { BTN + GAP };
+        let cy = if lower { total_h - content_h } else { 0 };
+        if let Some(c) = content.as_ref() {
+            if let Some(part) = IntRect::from_xywh(0, 0, visible as u32, content_h as u32).and_then(|r| c.clone_rect(r)) {
+                pix.draw_pixmap(cx, cy, part.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
             }
         }
-        if let Some((text, _)) = &self.status {
-            fill(&mut pix, &mut paint, Rect::from_xywh(0.0, y, PANEL_W as f32, 32.0).unwrap(), [30, 30, 30, 235]);
-            font.draw(&mut pix, text, 12.0, y + 21.0, 13.0, [255, 255, 255]);
-            y += 36.0;
-        }
-        for a in &activity {
-            let c = crate::util::color_for(&a.id);
-            fill(&mut pix, &mut paint, Rect::from_xywh(0.0, y, PANEL_W as f32, 28.0).unwrap(), [31, 31, 31, 235]);
-            fill(&mut pix, &mut paint, Rect::from_xywh(0.0, y, 5.0, 28.0).unwrap(), [c[0], c[1], c[2], 255]);
-            let verb = if a.controlling {
-                "керує"
-            } else if a.speaking {
-                "говорить"
-            } else {
-                "малює"
-            };
-            font.draw(&mut pix, &format!("{}: {verb}", a.name), 14.0, y + 19.0, 13.0, [242, 242, 242]);
-            y += 30.0;
-        }
-        if !self.items.is_empty() && self.policy.allow_hide_key || self.hidden_until.is_some() {
-            let label = if self.hidden_until.is_some() { "Показати малюнки" } else { "Сховати малюнки" };
-            fill(&mut pix, &mut paint, Rect::from_xywh(0.0, y, PANEL_W as f32, 28.0).unwrap(), [51, 51, 51, 245]);
-            font.draw(&mut pix, label, 12.0, y + 19.0, 13.0, [242, 242, 242]);
-            self.actions.push((Rect::from_xywh(0.0, y, PANEL_W as f32, 28.0).unwrap(), Action::HideDrawings));
-            y += 32.0;
-        }
-        if self.help_menu {
-            let mut labels: Vec<(String, String)> = vec![("Допоможіть".to_string(), String::new())];
-            labels.extend(self.policy.help_reasons.iter().map(|r| (r.clone(), r.clone())));
-            for (label, reason) in labels {
-                fill(&mut pix, &mut paint, Rect::from_xywh(0.0, y, PANEL_W as f32, 30.0).unwrap(), [31, 31, 31, 245]);
-                font.draw(&mut pix, &label, 12.0, y + 20.0, 13.0, [242, 242, 242]);
-                self.actions.push((Rect::from_xywh(0.0, y, PANEL_W as f32, 30.0).unwrap(), Action::HelpReason(reason)));
-                y += 32.0;
+        if show_button {
+            let (mx, my) = (bx as f32 + BTN as f32 / 2.0, by as f32 + BTN as f32 / 2.0);
+            let busy = !self.visible_activity().is_empty();
+            paint.set_color_rgba8(0, 120, 215, 235);
+            if let Some(c) = PathBuilder::from_circle(mx, my, BTN as f32 / 2.0 - 2.0) {
+                pix.fill_path(&c, &paint, FillRule::Winding, Transform::identity(), None);
+                if busy {
+                    paint.set_color_rgba8(108, 203, 95, 255);
+                    let ring = Stroke { width: 2.5, ..Default::default() };
+                    pix.stroke_path(&c, &paint, &ring, Transform::identity(), None);
+                }
             }
-        }
-        if self.help_waiting {
-            fill(&mut pix, &mut paint, Rect::from_xywh(0.0, y, PANEL_W as f32, 28.0).unwrap(), [51, 51, 51, 245]);
-            font.draw(&mut pix, "Скасувати запит", 12.0, y + 19.0, 13.0, [242, 242, 242]);
-            self.actions.push((Rect::from_xywh(0.0, y, PANEL_W as f32, 28.0).unwrap(), Action::HelpCancel));
-            y += 32.0;
-        }
-        if !self.hints.is_empty() {
+            let tw = font.width("?", 22.0);
+            font.draw(&mut pix, "?", mx - tw / 2.0, my + 8.0, 22.0, [255, 255, 255]);
             let unread = self.hints.iter().filter(|h| h.state == 0).count();
-            fill(&mut pix, &mut paint, Rect::from_xywh(0.0, y, PANEL_W as f32, 28.0).unwrap(), [51, 51, 51, 245]);
-            font.draw(&mut pix, "Історія", 12.0, y + 19.0, 13.0, [242, 242, 242]);
             if unread > 0 {
+                let (rx, ry) = (bx as f32 + BTN as f32 - 9.0, by as f32 + 9.0);
                 paint.set_color_rgba8(232, 17, 35, 255);
-                if let Some(c) = PathBuilder::from_circle(PANEL_W as f32 - 20.0, y + 14.0, 10.0) {
+                if let Some(c) = PathBuilder::from_circle(rx, ry, 9.0) {
                     pix.fill_path(&c, &paint, FillRule::Winding, Transform::identity(), None);
                 }
                 let label = unread.min(99).to_string();
-                let tw = font.width(&label, 12.0);
-                font.draw(&mut pix, &label, PANEL_W as f32 - 20.0 - tw / 2.0, y + 18.0, 12.0, [255, 255, 255]);
+                let lw = font.width(&label, 11.0);
+                font.draw(&mut pix, &label, rx - lw / 2.0, ry + 4.0, 11.0, [255, 255, 255]);
             }
-            self.actions.push((Rect::from_xywh(0.0, y, PANEL_W as f32, 28.0).unwrap(), Action::OpenHistory));
-            y += 32.0;
         }
-        if show_button {
-            let x = PANEL_W as f32 - 40.0;
-            fill(&mut pix, &mut paint, Rect::from_xywh(x, y, 40.0, 40.0).unwrap(), [0, 120, 215, 215]);
-            let tw = font.width("?", 22.0);
-            font.draw(&mut pix, "?", x + (40.0 - tw) / 2.0, y + 28.0, 22.0, [255, 255, 255]);
-            self.actions.push((Rect::from_xywh(x, y, 40.0, 40.0).unwrap(), Action::Help));
+        for (r, _) in self.actions.iter_mut() {
+            if let Some(moved) = Rect::from_xywh(r.x() + cx as f32, r.y() + cy as f32, r.width(), r.height()) {
+                *r = moved;
+            }
         }
+        self.toast_area = card_tops.iter().map(|(t, h)| (t + cy as f32, *h)).collect();
         self.font = Some(font);
-        let rects = capture::monitor_rects();
-        let primary = rects.iter().find(|r| r.0 == 0 && r.1 == 0).or(rects.first()).copied().unwrap_or((0, 0, 1920, 1080));
-        let (px, py) = (primary.0 + primary.2 - PANEL_W, primary.1 + (primary.3 - h) * 3 / 4 - h / 4);
-        let py = py.max(primary.1);
-        let Some(dib) = Dib::new(PANEL_W, h) else { return };
+        self.button_at = show_button.then_some((bx, by));
+        self.content_area = has_content.then_some((cx, cy, visible, content_h));
+        let (px, py) = (ax - bx, ay - by);
+        let Some(dib) = Dib::new(total_w, total_h) else { return };
         unsafe {
-            let _ = SetWindowPos(self.panel_hwnd, HWND_TOPMOST, px, py, PANEL_W, h, SWP_NOACTIVATE);
+            let _ = SetWindowPos(self.panel_hwnd, HWND_TOPMOST, px, py, total_w, total_h, SWP_NOACTIVATE);
         }
-        self.panel_rect = (px, py, PANEL_W, h);
+        self.panel_rect = (px, py, total_w, total_h);
         dib.present(self.panel_hwnd, px, py, &pix);
         if let Some(old) = self.panel_dib.replace(dib) {
             unsafe {
@@ -1051,6 +1114,77 @@ impl Ui {
         }
     }
 
+    /// Is this point, in screen pixels, on the button or on the open part of the panel?
+    fn over_panel(&self, p: POINT) -> (bool, bool) {
+        let (x, y, _, _) = self.panel_rect;
+        let (lx, ly) = (p.x - x, p.y - y);
+        let button = self.panel_visible && self.button_at.is_some_and(|(bx, by)| lx >= bx && lx < bx + BTN && ly >= by && ly < by + BTN);
+        let content = self.panel_visible && self.content_area.is_some_and(|(cx, cy, w, h)| lx >= cx && lx < cx + w && ly >= cy && ly < cy + h);
+        (button, content)
+    }
+
+    fn open_menu(&mut self, open: bool) {
+        self.menu_open = open;
+        self.history_top = 0;
+        self.menu_touch = Instant::now();
+        if open {
+            for h in self.hints.iter_mut() {
+                h.toast_from = None;
+                if h.state == 0 {
+                    h.state = 1;
+                    self.node.agent_hint_ack(&h.lead, h.id, 1);
+                }
+            }
+        }
+        self.panel_dirty = true;
+    }
+
+    fn panel_down(&mut self) {
+        let mut p = POINT::default();
+        unsafe {
+            let _ = GetCursorPos(&mut p);
+        }
+        if self.over_panel(p).0 {
+            self.drag = Some(Drag { start: (p.x, p.y), anchor: self.anchor.unwrap_or((p.x, p.y)), moved: false });
+        }
+    }
+
+    fn panel_move(&mut self) {
+        let Some(mut drag) = self.drag else { return };
+        let mut p = POINT::default();
+        unsafe {
+            let _ = GetCursorPos(&mut p);
+        }
+        let (dx, dy) = (p.x - drag.start.0, p.y - drag.start.1);
+        if drag.moved || dx.abs() > 4 || dy.abs() > 4 {
+            drag.moved = true;
+            self.anchor = Some((drag.anchor.0 + dx, drag.anchor.1 + dy));
+            self.drag = Some(drag);
+            self.panel_dirty = true;
+        }
+    }
+
+    fn panel_up(&mut self, x: i32, y: i32) {
+        match self.drag.take() {
+            Some(drag) if drag.moved => {
+                if let Some((ax, ay)) = self.anchor {
+                    let _ = std::fs::write(crate::util::data_dir().join(PANEL_CFG), format!("{ax} {ay}"));
+                }
+            }
+            Some(_) => self.open_menu(!self.menu_open),
+            None => {
+                let hit = self
+                    .actions
+                    .iter()
+                    .find(|(r, _)| (x as f32) >= r.left() && (x as f32) < r.right() && (y as f32) >= r.top() && (y as f32) < r.bottom())
+                    .map(|(_, a)| a.clone());
+                if let Some(a) = hit {
+                    self.do_action(a);
+                }
+            }
+        }
+    }
+
     fn do_action(&mut self, a: Action) {
         match a {
             Action::Ack(i, state) => {
@@ -1058,19 +1192,6 @@ impl Ui {
                     h.state = state;
                     h.toast_from = None;
                     self.node.agent_hint_ack(&h.lead, h.id, state);
-                }
-            }
-            Action::OpenHistory => {
-                self.history_open = !self.history_open;
-                self.history_top = 0;
-                if self.history_open {
-                    for h in self.hints.iter_mut() {
-                        h.toast_from = None;
-                        if h.state == 0 {
-                            h.state = 1;
-                            self.node.agent_hint_ack(&h.lead, h.id, 1);
-                        }
-                    }
                 }
             }
             Action::Consent(i, allow) => {
@@ -1084,9 +1205,8 @@ impl Ui {
                     crate::sysutil::clipboard_set(&h.text);
                 }
             }
-            Action::Help => self.help_menu = !self.help_menu,
             Action::HelpReason(r) => {
-                self.help_menu = false;
+                self.menu_open = false;
                 self.node.agent_request_help(r);
             }
             Action::HelpCancel => {
@@ -1102,17 +1222,19 @@ impl Ui {
         Duration::from_secs(self.policy.hint_show_sec.max(10) as u64)
     }
 
-    /// Cards stay while the cursor is on them, then slide away. A click elsewhere closes the list.
+    /// Cards stay while the cursor is on them, then slide into the button.
+    /// The open menu folds back by itself, or at once after a click elsewhere.
     fn tick_hints(&mut self) {
         let now = Instant::now();
         let mut p = POINT::default();
         unsafe {
             let _ = GetCursorPos(&mut p);
         }
-        let (x, y, w, h) = self.panel_rect;
-        let over = self.panel_visible && p.x >= x && p.x < x + w && p.y >= y && p.y < y + h;
+        let (over_button, over_content) = self.over_panel(p);
+        let over = over_button || over_content;
+        let (_, y, _, _) = self.panel_rect;
         // Only a cursor on the card itself keeps it, a mouse parked nearby must not.
-        let over_card = over && self.toast_area.iter().any(|(top, height)| (p.y - y) as f32 >= *top && ((p.y - y) as f32) < top + height);
+        let over_card = over_content && self.toast_area.iter().any(|(top, height)| (p.y - y) as f32 >= *top && ((p.y - y) as f32) < top + height);
         let hold = self.hint_hold();
         let mut changed = false;
         for hint in self.hints.iter_mut() {
@@ -1128,19 +1250,38 @@ impl Ui {
             }
             changed = true;
         }
+        // A hint nobody answered for ten minutes counts as ignored and stops being "new".
+        for hint in self.hints.iter_mut().filter(|h| h.state <= 1 && now.duration_since(h.at) >= HINT_EXPIRE) {
+            hint.state = 4;
+            hint.toast_from = None;
+            self.node.agent_hint_ack(&hint.lead, hint.id, 4);
+            changed = true;
+        }
         // Nobody took the request: for the leads it is now a missed one.
         if self.help_waiting && self.help_since.is_some_and(|t| now.duration_since(t) >= HELP_WAIT) {
             self.help_waiting = false;
-            self.status = Some(("Запит пропущено".into(), now));
+            self.status = Some((tr("Запит пропущено").into(), now));
             changed = true;
         }
         let down = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } < 0;
-        if down && !self.lbutton_was && !over && (self.history_open || self.help_menu) {
-            self.history_open = false;
-            self.help_menu = false;
-            changed = true;
+        if self.menu_open {
+            if over {
+                self.menu_touch = now;
+            }
+            let clicked_away = down && !self.lbutton_was && !over;
+            if clicked_away || now.duration_since(self.menu_touch) >= MENU_IDLE {
+                self.menu_open = false;
+                changed = true;
+            }
         }
         self.lbutton_was = down;
+        let target = if self.menu_open { 1.0 } else { 0.0 };
+        if self.menu_progress != target {
+            let step = now.duration_since(self.last_tick).as_secs_f32() / MENU_SLIDE.as_secs_f32();
+            self.menu_progress = if target > self.menu_progress { (self.menu_progress + step).min(1.0) } else { (self.menu_progress - step).max(0.0) };
+            changed = true;
+        }
+        self.last_tick = now;
         // Redraw now and then, a picture left from a locked Windows must not stay on screen.
         if self.panel_visible && now.duration_since(self.last_refresh) >= Duration::from_secs(1) {
             self.last_refresh = now;
@@ -1166,14 +1307,14 @@ impl Ui {
         unsafe {
             let Ok(menu) = CreatePopupMenu() else { return };
             if self.is_lead_pc {
-                let _ = AppendMenuW(menu, MF_STRING, 1, w!("Розгорнути"));
+                let _ = AppendMenuW(menu, MF_STRING, 1, PCWSTR(wide(tr("Розгорнути")).as_ptr()));
             } else {
-                let _ = AppendMenuW(menu, MF_STRING, 2, w!("Потрібна допомога"));
+                let _ = AppendMenuW(menu, MF_STRING, 2, PCWSTR(wide(tr("Потрібна допомога")).as_ptr()));
             }
-            let _ = AppendMenuW(menu, MF_STRING, 3, w!("Налаштування…"));
-            let _ = AppendMenuW(menu, MF_STRING, 5, w!("Перезапустити"));
+            let _ = AppendMenuW(menu, MF_STRING, 3, PCWSTR(wide(tr("Налаштування…")).as_ptr()));
+            let _ = AppendMenuW(menu, MF_STRING, 5, PCWSTR(wide(tr("Перезапустити")).as_ptr()));
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
-            let _ = AppendMenuW(menu, MF_STRING, 4, w!("Закрити програму…"));
+            let _ = AppendMenuW(menu, MF_STRING, 4, PCWSTR(wide(tr("Закрити програму…")).as_ptr()));
             let mut p = POINT::default();
             let _ = GetCursorPos(&mut p);
             // Without the foreground window a click elsewhere would not close the menu.
@@ -1199,16 +1340,9 @@ impl Ui {
         let events: Vec<Ev> = EVENTS.with(|v| std::mem::take(&mut *v.borrow_mut()));
         for e in events {
             match e {
-                Ev::PanelClick(x, y) => {
-                    let hit = self
-                        .actions
-                        .iter()
-                        .find(|(r, _)| (x as f32) >= r.left() && (x as f32) < r.right() && (y as f32) >= r.top() && (y as f32) < r.bottom())
-                        .map(|(_, a)| a.clone());
-                    if let Some(a) = hit {
-                        self.do_action(a);
-                    }
-                }
+                Ev::PanelDown => self.panel_down(),
+                Ev::PanelMove => self.panel_move(),
+                Ev::PanelUp(x, y) => self.panel_up(x, y),
                 Ev::PanelWheel(delta) => {
                     let limit = self.hints.len().saturating_sub(HISTORY_ROWS) as i32;
                     self.history_top = (self.history_top as i32 + delta.signum()).clamp(0, limit.max(0)) as usize;
@@ -1232,8 +1366,8 @@ impl Ui {
             || self.hidden_until.is_some()
             || !self.pointers.is_empty()
             || !self.taps.is_empty()
-            || self.history_open
-            || self.help_menu
+            || self.menu_open
+            || self.menu_progress > 0.0
             || self.hints.iter().any(|h| h.toast_from.is_some())
     }
 
@@ -1255,16 +1389,16 @@ impl Ui {
 /// The row of answers under a hint.
 fn draw_ack_row(font: &Font, pix: &mut Pixmap, actions: &mut Vec<(Rect, Action)>, x0: f32, y: f32, i: usize) {
     for (label, state, color, dx, w) in [
-        ("Прийняв", 2u8, [108, 203, 95], 15.0f32, 66.0f32),
-        ("Відхилив", 3, [255, 120, 130], 88.0, 70.0),
-        ("Ігнор", 4, [190, 190, 190], 166.0, 46.0),
+        (tr("Прийняв"), 2u8, [108, 203, 95], 15.0f32, 66.0f32),
+        (tr("Відхилив"), 3, [255, 120, 130], 88.0, 70.0),
+        (tr("Ігнор"), 4, [190, 190, 190], 166.0, 46.0),
     ] {
         font.draw(pix, label, x0 + dx, y + 15.0, 12.0, color);
         if let Some(r) = Rect::from_xywh(x0 + dx - 5.0, y - 2.0, w, 24.0) {
             actions.push((r, Action::Ack(i, state)));
         }
     }
-    font.draw(pix, "Копія", x0 + 226.0, y + 15.0, 12.0, [96, 205, 255]);
+    font.draw(pix, tr("Копія"), x0 + 226.0, y + 15.0, 12.0, [96, 205, 255]);
     if let Some(r) = Rect::from_xywh(x0 + 221.0, y - 2.0, 55.0, 24.0) {
         actions.push((r, Action::CopyHint(i)));
     }
@@ -1433,7 +1567,17 @@ pub fn run(node: Arc<Node>, rx: Receiver<UiCmd>, handle: UiHandle, is_lead_pc: b
             overlays: Vec::new(),
             items: Vec::new(),
             hints: Vec::new(),
-            history_open: false,
+            menu_open: false,
+            menu_progress: 0.0,
+            menu_touch: Instant::now(),
+            last_tick: Instant::now(),
+            anchor: std::fs::read_to_string(crate::util::data_dir().join(PANEL_CFG)).ok().and_then(|t| {
+                let mut parts = t.split_whitespace().map(|v| v.parse::<i32>().ok());
+                Some((parts.next()??, parts.next()??))
+            }),
+            drag: None,
+            button_at: None,
+            content_area: None,
             history_top: 0,
             consent: Vec::new(),
             pointers: Vec::new(),
@@ -1445,7 +1589,6 @@ pub fn run(node: Arc<Node>, rx: Receiver<UiCmd>, handle: UiHandle, is_lead_pc: b
             activity: Vec::new(),
             policy,
             font: Font::load(),
-            help_menu: false,
             help_waiting: false,
             help_since: None,
             status: None,
