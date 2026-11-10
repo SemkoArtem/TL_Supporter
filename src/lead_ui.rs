@@ -62,6 +62,8 @@ struct SettingsDraft {
     confirm_employee_mode: bool,
     exit_pw: String,
     reset_pw: String,
+    /// The lead's own name while it is being edited, filled in on first show.
+    my_name: Option<String>,
     role_pw: String,
     update_busy: bool,
     update_result: std::sync::Arc<parking_lot::Mutex<Option<String>>>,
@@ -1604,6 +1606,30 @@ impl LeadApp {
     }
 
     fn settings_general(&mut self, ui: &mut egui::Ui) {
+        theme::card(ui, tr("Профіль"), |ui| {
+            ui.horizontal(|ui| {
+                ui.label(tr("Моє ім'я"));
+                let node = self.node.clone();
+                let name = self.draft.my_name.get_or_insert_with(|| node.my_name());
+                theme::field(ui, name, "", false, 240.0);
+                let new: String = name.trim().chars().take(40).collect();
+                if ui.button(tr("Зберегти")).clicked() && !new.is_empty() {
+                    // Every PC of the team shows the new name, so it goes through the team data.
+                    let me = self.node.identity.id.clone();
+                    let stored = new.clone();
+                    self.node.update_directory(|d, by| {
+                        if let Some(m) = d.members.get_mut(&me) {
+                            m.name = stored;
+                            m.rev = Rev::new(by);
+                        }
+                    });
+                    self.node.state.write().display_name = new.clone();
+                    self.node.save();
+                    self.node.audit_log(&new, "Змінено ім'я або групу");
+                    self.draft.message = tr("Збережено.").into();
+                }
+            });
+        });
         theme::card(ui, tr("Вигляд"), |ui| {
             egui::Grid::new("look").num_columns(2).spacing([24.0, 10.0]).show(ui, |ui| {
                 ui.label(tr("Мова"));
@@ -2019,7 +2045,7 @@ impl LeadApp {
         ui.label(format!("{}: {}", tr("Поточна версія"), crate::util::APP_VERSION));
         ui.horizontal(|ui| {
             ui.label("GitHub");
-            ui.add(egui::TextEdit::singleline(&mut self.draft.repo).desired_width(240.0).hint_text(tr("власник/назва")));
+            ui.add(egui::TextEdit::singleline(&mut self.draft.repo).desired_width(240.0).hint_text(crate::update::DEFAULT_REPO));
             if ui.add_enabled(admin, egui::Button::new(tr("Зберегти"))).clicked() {
                 let repo = self.draft.repo.trim().to_string();
                 self.update_policy(|p| p.update_repo = repo);

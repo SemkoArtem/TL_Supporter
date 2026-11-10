@@ -11,7 +11,7 @@ talk into their headset, send text and take over the mouse and keyboard when nee
 
 Requirements: Windows 10 version 2004 or later, Windows 11. A single file, `TLSupporter.exe`.
 
-Status: first version for testing. This repository is private, there is no license yet and all rights are reserved.
+Status: version 0.2 for testing. There is no license yet, all rights are reserved.
 The program is free of charge, a free license is planned for later.
 
 ### Features
@@ -43,19 +43,20 @@ Stack: Rust, egui, quinn, Opus, DXGI Desktop Duplication, WASAPI.
 
 ### Testing status
 
-Tested with two copies on one PC: discovery by key, join code, screen, thumbnails, drawings, text hints,
-control, voice, computer sound, switching to the secure channel on a simulated lock.
-Tested on one real PC: service installation, SYSTEM process, firewall rule, restart after the program is killed.
+Tested with copies of the program on one PC: discovery, join code, screen, thumbnails, drawings, text hints,
+control, voice, computer sound, the secure channel on a simulated lock, promotion to a lead, factory reset,
+and attacks on the network protocol and on the data files.
+Tested on one real PC with an earlier version: service installation, SYSTEM process, firewall rule, restart after the program is killed.
 
-Not yet tested: operation between two computers, real lock and sign-in screens and administrator windows,
-drawing and control over full-screen mstsc, publishing an update.
+Not yet tested: two real computers, the service of version 0.2, real lock and sign-in screens and administrator windows,
+drawing and control over full-screen mstsc, the built-in update.
 
 ### Installation
 
 You need a Windows account with administrator rights. Run every command below in PowerShell opened as administrator
 (Start → type `PowerShell` → Run as administrator).
 
-**Quick way.** Download [install.ps1](install.ps1) and run `powershell -ExecutionPolicy Bypass -File .\install.ps1`. It creates the folder, adds the Defender exclusions, downloads the program and installs it so that it starts with Windows. The repository is private, so it asks for a GitHub token with read access to this repository. The token is not stored. The steps below do the same by hand.
+**Quick way.** Download [install.ps1](install.ps1) and run `powershell -ExecutionPolicy Bypass -File .\install.ps1`. It creates the folder, adds the Defender exclusions, downloads the program and installs it so that it starts with Windows. The steps below do the same by hand.
 
 **1. Add the program to the Windows Defender exclusions.** Do this on every PC before the file gets there.
 The program controls a computer remotely and has no publisher signature yet, so Defender may quarantine it as a trojan.
@@ -70,8 +71,8 @@ Check the result. Both folders must be listed:
 
 If the PC uses another antivirus, add the same two folders in its settings.
 
-**2. Put the file into that folder.** Download [TLSupporter.exe](https://github.com/SemkoArtem/TL_Supporter/raw/main/download/TLSupporter.exe)
-while signed in to a GitHub account that has access to this repository, or copy it from a USB drive.
+**2. Put the file into that folder.** Download [TLSupporter.exe](https://github.com/SemkoArtem/TL_Supporter/releases/latest/download/TLSupporter.exe)
+from the latest release, or copy it from a USB drive.
 Save it as `C:\TLSupporterSetup\TLSupporter.exe`, then allow it to run:
 
     Unblock-File "C:\TLSupporterSetup\TLSupporter.exe"
@@ -90,7 +91,8 @@ Save it as `C:\TLSupporterSetup\TLSupporter.exe`, then allow it to run:
 
 #### Installing a new version
 
-Replace the file in `C:\TLSupporterSetup`, then run the commands below. The team and settings are kept.
+Run `install.ps1` again, or let a lead with the Administration right update the whole team: Settings → Updates → Check and distribute.
+By hand: replace the file in `C:\TLSupporterSetup`, then run the commands below. The team and settings are kept.
 
     Unblock-File "C:\TLSupporterSetup\TLSupporter.exe"
     Start-Process "C:\TLSupporterSetup\TLSupporter.exe" -ArgumentList "--uninstall" -Wait
@@ -120,7 +122,7 @@ Needed when a PC already belongs to a team, for example when it was set up as a 
 #### If something goes wrong
 
 - Defender blocked it: Windows Security → Protection history. Check that step 1 was done and install again.
-- The program log is `C:\ProgramData\TLSupporter\tlsupporter.log`.
+- The program log is `C:\ProgramData\TLSupporter\tlsupporter.log`, the service log is `C:\Program Files\TLSupporterData\system.log`.
 
 Network: UDP 47700–47703, the firewall rule is added for the local subnet only.
 
@@ -145,7 +147,7 @@ Updates cannot be published without it, so keep a backup.
     TLSupporter.exe --sign-release TLSupporter.exe %USERPROFILE%\.tlsupporter\release_private.key 0.2.0
 
 Upload `TLSupporter.exe` and `TLSupporter.exe.sig` to a GitHub Release tagged `v0.2.0`.
-Releases must be in a public repository, set as `owner/name` in the settings.
+The program looks for releases in `SemkoArtem/TL_Supporter` unless another `owner/name` is set in the settings.
 Add new protocol fields only in a way that older versions can ignore them (see `src/proto.rs`).
 
 ### Running two copies on one PC
@@ -166,7 +168,7 @@ The "client hears" mode needs a signed virtual microphone driver. Its button in 
 
 Вимоги: Windows 10 версії 2004 або новіша, Windows 11. Один файл `TLSupporter.exe`.
 
-Стан: перша версія для тестування. Репозиторій закритий, ліцензії поки немає, усі права застережено.
+Стан: версія 0.2 для тестування. Ліцензії поки немає, усі права застережено.
 Програма безкоштовна, вільну ліцензію планується додати пізніше.
 
 ### Можливості
@@ -198,19 +200,20 @@ The "client hears" mode needs a signed virtual microphone driver. Its button in 
 
 ### Стан перевірки
 
-Перевірено двома копіями на одному ПК: пошук за ключем, код приєднання, екран, мініатюри, малюнки, текстові підказки,
-керування, голос, звук комп'ютера, перемикання на захищений канал при імітації блокування.
-Перевірено на одному реальному ПК: встановлення служби, процес SYSTEM, правило брандмауера, перезапуск після примусового закриття.
+Перевірено копіями програми на одному ПК: пошук, код приєднання, екран, мініатюри, малюнки, текстові підказки,
+керування, голос, звук комп'ютера, захищений канал при імітації блокування, підвищення до керівника, скидання до заводських,
+а також атаки на мережевий протокол і файли даних.
+Перевірено на одному реальному ПК зі старішою версією: встановлення служби, процес SYSTEM, правило брандмауера, перезапуск після примусового закриття.
 
-Ще не перевірено: робота між двома комп'ютерами, справжні екрани блокування, входу і вікна адміністратора,
-малюнки й керування поверх mstsc на весь екран, випуск оновлення.
+Ще не перевірено: два реальні комп'ютери, служба версії 0.2, справжні екрани блокування, входу і вікна адміністратора,
+малюнки й керування поверх mstsc на весь екран, вбудоване оновлення.
 
 ### Встановлення
 
 Потрібен обліковий запис Windows із правами адміністратора. Усі команди нижче виконуй у PowerShell, відкритому від імені адміністратора
 (Пуск → введи `PowerShell` → Запуск від імені адміністратора).
 
-**Швидкий спосіб.** Завантаж [install.ps1](install.ps1) і виконай `powershell -ExecutionPolicy Bypass -File .\install.ps1`. Скрипт створить папку, додасть виключення Defender, завантажить програму і встановить її в автозавантаження Windows. Репозиторій закритий, тому він попросить токен GitHub із правом читання цього репозиторію. Токен ніде не зберігається. Кроки нижче роблять те саме вручну.
+**Швидкий спосіб.** Завантаж [install.ps1](install.ps1) і виконай `powershell -ExecutionPolicy Bypass -File .\install.ps1`. Скрипт створить папку, додасть виключення Defender, завантажить програму і встановить її в автозавантаження Windows. Кроки нижче роблять те саме вручну.
 
 **1. Додай програму у виключення Windows Defender.** Зроби це на кожному ПК ще до того, як файл туди потрапить.
 Програма дистанційно керує комп'ютером і поки не має підпису видавця, тому Defender може покласти її в карантин як троян.
@@ -225,8 +228,8 @@ The "client hears" mode needs a signed virtual microphone driver. Its button in 
 
 Якщо на ПК інший антивірус, додай ті самі дві папки в його налаштуваннях.
 
-**2. Поклади файл у цю папку.** Завантаж [TLSupporter.exe](https://github.com/SemkoArtem/TL_Supporter/raw/main/download/TLSupporter.exe),
-увійшовши в акаунт GitHub, який має доступ до цього репозиторію, або скопіюй його з флешки.
+**2. Поклади файл у цю папку.** Завантаж [TLSupporter.exe](https://github.com/SemkoArtem/TL_Supporter/releases/latest/download/TLSupporter.exe)
+з останнього випуску або скопіюй його з флешки.
 Збережи як `C:\TLSupporterSetup\TLSupporter.exe` і дозволь запуск:
 
     Unblock-File "C:\TLSupporterSetup\TLSupporter.exe"
@@ -245,7 +248,8 @@ The "client hears" mode needs a signed virtual microphone driver. Its button in 
 
 #### Встановлення нової версії
 
-Заміни файл у `C:\TLSupporterSetup` і виконай команди нижче. Команда і налаштування збережуться.
+Запусти `install.ps1` ще раз або попроси керівника з правом «Адміністрування» оновити всю команду: Налаштування → Оновлення → «Перевірити й розіслати».
+Вручну: заміни файл у `C:\TLSupporterSetup` і виконай команди нижче. Команда і налаштування збережуться.
 
     Unblock-File "C:\TLSupporterSetup\TLSupporter.exe"
     Start-Process "C:\TLSupporterSetup\TLSupporter.exe" -ArgumentList "--uninstall" -Wait
@@ -275,7 +279,7 @@ The "client hears" mode needs a signed virtual microphone driver. Its button in 
 #### Якщо щось пішло не так
 
 - Defender заблокував: Безпека Windows → Журнал захисту. Перевір, що крок 1 виконано, і встанови знову.
-- Журнал програми: `C:\ProgramData\TLSupporter\tlsupporter.log`.
+- Журнал програми: `C:\ProgramData\TLSupporter\tlsupporter.log`, журнал служби: `C:\Program Files\TLSupporterData\system.log`.
 
 Мережа: UDP 47700–47703, правило брандмауера додається лише для локальної підмережі.
 
@@ -300,7 +304,7 @@ The "client hears" mode needs a signed virtual microphone driver. Its button in 
     TLSupporter.exe --sign-release TLSupporter.exe %USERPROFILE%\.tlsupporter\release_private.key 0.2.0
 
 Завантаж `TLSupporter.exe` і `TLSupporter.exe.sig` у GitHub Release із тегом `v0.2.0`.
-Випуски мають бути в публічному репозиторії, у налаштуваннях вказується `власник/назва`.
+Програма шукає випуски в `SemkoArtem/TL_Supporter`, якщо в налаштуваннях не вказано інший `власник/назва`.
 Нові поля в протоколі додавай лише так, щоб старі версії могли їх ігнорувати (див. `src/proto.rs`).
 
 ### Перевірка двох копій на одному ПК

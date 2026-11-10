@@ -12,6 +12,14 @@ use std::sync::Arc;
 const RELEASE_PUBLIC: &[u8] = include_bytes!("../assets/release_public.bin");
 const MAX_SIZE: u64 = 200 * 1024 * 1024;
 
+/// Where releases are looked for when the settings name no other repository.
+pub const DEFAULT_REPO: &str = "SemkoArtem/TL_Supporter";
+
+pub fn release_repo(configured: &str) -> String {
+    let repo = configured.trim();
+    if repo.is_empty() { DEFAULT_REPO.to_string() } else { repo.to_string() }
+}
+
 pub fn update_dir() -> PathBuf {
     let d = data_dir().join("update");
     let _ = std::fs::create_dir_all(&d);
@@ -145,10 +153,7 @@ fn send_update(node: &Arc<Node>, version: &str, exe: Arc<Vec<u8>>, sig: Arc<Vec<
 
 /// Download from GitHub, check the signature and hand the update to this PC and all connected PCs.
 pub fn check_and_distribute(node: &Arc<Node>) -> String {
-    let repo = node.state.read().directory.policy.update_repo.clone();
-    if repo.is_empty() {
-        return crate::i18n::tr("Спочатку вкажи репозиторій.").into();
-    }
+    let repo = release_repo(&node.state.read().directory.policy.update_repo);
     match github_latest(&repo) {
         Err(e) => format!("{}: {e}", crate::i18n::tr("Не вдалося перевірити")),
         Ok((tag, exe, _)) if exe.is_empty() => format!("{} ({tag}).", crate::i18n::tr("Встановлено останню версію")),
@@ -196,6 +201,14 @@ pub async fn receive_update(mut s: quinn::RecvStream) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_project_repository_is_used_unless_another_is_set() {
+        assert_eq!(release_repo(""), DEFAULT_REPO);
+        assert_eq!(release_repo("  "), DEFAULT_REPO);
+        assert_eq!(release_repo(" someone/fork "), "someone/fork");
+        assert!(is_newer("0.2.0", "0.1.4"));
+    }
 
     #[test]
     fn versions_compare_numerically() {
