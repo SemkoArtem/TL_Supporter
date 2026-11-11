@@ -100,6 +100,10 @@ By hand: replace the file in `C:\TLSupporterSetup`, then run the commands below.
 
 #### Removing the program
 
+**Quick way.** Download [uninstall.ps1](uninstall.ps1) and run `powershell -ExecutionPolicy Bypass -File .\uninstall.ps1`. It asks for administrator rights and a confirmation, then removes the service, the program, the firewall rule, the Defender exclusions and all data, including the team of this PC. With `-Check` it only lists what is installed. Afterwards a lead should revoke this PC's access in the console.
+
+By hand:
+
     Start-Process "C:\TLSupporterSetup\TLSupporter.exe" -ArgumentList "--uninstall" -Wait
     Remove-MpPreference -ExclusionPath "C:\TLSupporterSetup"
     Remove-MpPreference -ExclusionPath "C:\Program Files\TLSupporter"
@@ -256,6 +260,10 @@ The "client hears" mode needs a signed virtual microphone driver. Its button in 
     Start-Process "C:\TLSupporterSetup\TLSupporter.exe" -ArgumentList "--install" -Wait
 
 #### Видалення програми
+
+**Швидкий спосіб.** Завантаж [uninstall.ps1](uninstall.ps1) і виконай `powershell -ExecutionPolicy Bypass -File .\uninstall.ps1`. Скрипт попросить права адміністратора і підтвердження, а тоді видалить службу, програму, правило брандмауера, виключення Defender і всі дані, разом із командою цього ПК. З параметром `-Check` він лише покаже, що встановлено. Після цього керівнику варто скасувати доступ цього ПК у консолі.
+
+Вручну:
 
     Start-Process "C:\TLSupporterSetup\TLSupporter.exe" -ArgumentList "--uninstall" -Wait
     Remove-MpPreference -ExclusionPath "C:\TLSupporterSetup"
