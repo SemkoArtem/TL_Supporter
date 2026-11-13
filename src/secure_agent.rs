@@ -287,7 +287,7 @@ impl Secure {
                 let st = self.state.read();
                 (st.directory.team_key(), net::team_tag(&st.directory.team_id))
             };
-            if key.is_empty() || tag != my_tag || net::probe_mac(&key, &tag, &id, port) != mac {
+            if key.is_empty() || tag != my_tag || !crate::secure::ct_eq(&net::probe_mac(&key, &tag, &id, port), &mac) {
                 continue;
             }
             let reply = Disc::SecurePong {

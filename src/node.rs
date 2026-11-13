@@ -32,6 +32,9 @@ pub struct NetConfig {
 /// The secure discovery port is always this far above the normal one.
 pub const SECURE_DISCOVERY_OFFSET: u16 = 3;
 
+/// Journal entries per message when two leads exchange their journals.
+const LOG_SYNC_PART: usize = 1000;
+
 impl NetConfig {
     pub fn from_env() -> Self {
         let port = |name: &str, default| crate::util::test_env(name).and_then(|v| v.parse().ok()).unwrap_or(default);
@@ -279,7 +282,7 @@ impl Node {
         let result = {
             let mut guard = self.add_check.lock();
             let c = guard.as_mut()?;
-            if c.expires_ms < now_ms() || net::code_tag(&c.code) != tag || net::join_mac(&c.code, id, public_b64, name) != mac {
+            if c.expires_ms < now_ms() || net::code_tag(&c.code) != tag || !secure::ct_eq(&net::join_mac(&c.code, id, public_b64, name), mac) {
                 return None;
             }
             if !c.found_id.is_empty() && c.found_id != id {
@@ -441,10 +444,20 @@ impl Node {
         if !self.is_lead() || !crate::update::is_newer(APP_VERSION, &peer.app_version) {
             return;
         }
+        // Each reason is written once per PC, so that a report shows why nothing was sent.
+        let note = |why: &str| {
+            if self.offered.lock().insert(format!("{}:{why}", peer.id)) {
+                crate::logi!("not giving version {APP_VERSION} to {} that runs {}: {why}", peer.id, peer.app_version);
+            }
+        };
         if !self.state.read().directory.member(&self.identity.id).is_some_and(|m| m.rights.admin) {
+            note("this lead has no administration right");
             return;
         }
-        let Some((exe, sig)) = crate::update::own_release() else { return };
+        let Some((exe, sig)) = crate::update::own_release() else {
+            note("no valid release signature beside this program");
+            return;
+        };
         if !self.offered.lock().insert(peer.id.clone()) {
             return;
         }
@@ -712,7 +725,12 @@ impl Node {
             let d = self.state.read().directory.clone();
             peer.send(Msg::DirSync(Box::new(if is_lead { d } else { d.for_agent() })));
             if is_lead {
-                peer.send(Msg::LogSync(self.audit.lock().clone()));
+                // In parts: the whole journal in one message could pass the size limit, and the
+                // link would then break again and again.
+                let audit = self.audit.lock().clone();
+                for part in audit.chunks(LOG_SYNC_PART) {
+                    peer.send(Msg::LogSync(part.to_vec()));
+                }
             }
         }
         if is_lead {
@@ -895,7 +913,7 @@ impl Node {
                 if team_key.is_empty() || tag != my_tag || id == self.identity.id {
                     return;
                 }
-                if net::probe_mac(&team_key, &tag, &id, port) != mac {
+                if !secure::ct_eq(&net::probe_mac(&team_key, &tag, &id, port), &mac) {
                     return;
                 }
                 let public_b64 = secure::b64(&self.identity.public);
@@ -919,7 +937,7 @@ impl Node {
                     let st = self.state.read();
                     (st.directory.team_key(), net::team_tag(&st.directory.team_id))
                 };
-                if tag != my_tag || net::pong_mac(&team_key, &tag, &id, &name, &public_b64, port, &proof_b64) != mac {
+                if tag != my_tag || !secure::ct_eq(&net::pong_mac(&team_key, &tag, &id, &name, &public_b64, port, &proof_b64), &mac) {
                     return;
                 }
                 let Ok(public) = secure::unb64(&public_b64) else { return };
@@ -947,7 +965,7 @@ impl Node {
                     let st = self.state.read();
                     (st.directory.team_key(), net::team_tag(&st.directory.team_id), st.directory.lead_can_reach(&self.identity.id, &id))
                 };
-                if !reachable || tag != my_tag || net::secure_pong_mac(&key, &tag, &id, port) != mac {
+                if !reachable || tag != my_tag || !secure::ct_eq(&net::secure_pong_mac(&key, &tag, &id, port), &mac) {
                     return;
                 }
                 self.dial_secure(id, SocketAddr::new(src.ip(), port));
@@ -975,7 +993,7 @@ impl Node {
             let mut codes = self.join_codes.lock();
             codes.retain(|c| c.expires_ms > now_ms());
             let Some(pos) = codes.iter().position(|c| net::code_tag(&c.code) == tag) else { return };
-            if net::join_mac(&codes[pos].code, &id, &public_b64, &name) != mac {
+            if !secure::ct_eq(&net::join_mac(&codes[pos].code, &id, &public_b64, &name), &mac) {
                 return;
             }
             let c = codes.remove(pos); // one-time
