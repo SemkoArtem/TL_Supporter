@@ -99,6 +99,9 @@ pub struct LeadApp {
     pointer_last_ms: i64,
     pointer_last: [f32; 2],
     hints_open: bool,
+    /// The monitor the employee's cursor moved to, and since when. Following waits a moment,
+    /// so that a cursor passing over the edge does not switch the picture back and forth.
+    follow_seen: Option<(u8, std::time::Instant)>,
     selected: std::collections::HashSet<String>,
     collapsed: std::collections::HashSet<String>,
     renaming: Option<(String, String)>,
@@ -193,6 +196,7 @@ impl LeadApp {
             pointer_last_ms: 0,
             pointer_last: [0.0, 0.0],
             hints_open: true,
+            follow_seen: None,
             selected: Default::default(),
             collapsed: Default::default(),
             renaming: None,
@@ -1396,11 +1400,43 @@ impl LeadApp {
                     }
                 });
                 if monitors.len() > 1 {
+                    let follow = self.node.state.read().lead.follow_cursor;
+                    let picked = next.monitor;
                     egui::ComboBox::from_id_salt("mon").width(40.0).selected_text(format!("{}", mode.monitor + 1)).show_ui(ui, |ui| {
                         for m in &monitors {
                             ui.selectable_value(&mut next.monitor, m.index, format!("{}", m.index + 1));
                         }
-                    });
+                    })
+                    .response
+                    .on_hover_text(tr("Монітор"));
+                    if theme::tool_button(ui, icon::POINTER, follow, tr("Слідувати за курсором: показувати монітор, де зараз курсор працівника")).clicked() {
+                        self.save_lead(|l| l.follow_cursor = !follow);
+                        self.follow_seen = None;
+                    }
+                    // Choosing a monitor by hand turns following off, otherwise it would jump back.
+                    if follow && next.monitor != picked {
+                        self.save_lead(|l| l.follow_cursor = false);
+                    } else if follow && mode.screen != ScreenLevel::Off {
+                        match cursor {
+                            Some((m, _, _)) if m != mode.monitor && monitors.iter().any(|x| x.index == m) => {
+                                let since = match self.follow_seen {
+                                    Some((seen, at)) if seen == m => at,
+                                    _ => {
+                                        let now = std::time::Instant::now();
+                                        self.follow_seen = Some((m, now));
+                                        now
+                                    }
+                                };
+                                if since.elapsed() >= std::time::Duration::from_millis(400) {
+                                    next.monitor = m;
+                                    self.follow_seen = None;
+                                } else {
+                                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+                                }
+                            }
+                            _ => self.follow_seen = None,
+                        }
+                    }
                 }
                 if next != mode {
                     self.node.lead_set_mode(&id, next);
@@ -2197,7 +2233,12 @@ impl LeadApp {
         let groups = self.group_options();
         let owner = self.node.state.read().directory.owner_id.clone();
         for lead in leads {
-            ui.strong(&lead.name);
+            ui.horizontal(|ui| {
+                ui.strong(&lead.name);
+                if self.node.state.read().directory.awaits_owner(&lead) {
+                    ui.colored_label(Color32::from_rgb(202, 130, 16), tr("Чекає підтвердження головним ПК"));
+                }
+            });
             if lead.id == owner && owner != my_id {
                 ui.weak(tr("Головний ПК"));
                 ui.add_space(8.0);
@@ -2283,6 +2324,14 @@ impl LeadApp {
                 ui.label(format!("{}: {v}", tr("Версія")));
             }
             let main_pc = self.node.state.read().directory.owner_id == dlg.id;
+            let waits = {
+                let st = self.node.state.read();
+                st.directory.member(&dlg.id).is_some_and(|m| st.directory.awaits_owner(m))
+            };
+            if waits {
+                ui.colored_label(Color32::from_rgb(202, 130, 16), tr("Чекає підтвердження головним ПК"))
+                    .on_hover_text(tr("Роль, доступ і права цього ПК інші ПК приймуть, коли головний ПК буде в мережі й підтвердить їх"));
+            }
             ui.horizontal(|ui| {
                 ui.label(tr("Ім'я:"));
                 ui.add(egui::TextEdit::singleline(&mut dlg.name).desired_width(220.0));

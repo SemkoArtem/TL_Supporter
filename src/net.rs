@@ -254,9 +254,20 @@ pub fn is_local_address(ip: IpAddr) -> bool {
     }
 }
 
+/// The address belongs to this PC itself: binding to it works only for its own addresses.
+pub fn is_this_pc(ip: IpAddr) -> bool {
+    ip.is_loopback() || ip.is_unspecified() || std::net::UdpSocket::bind(SocketAddr::new(ip, 0)).is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn own_addresses_are_recognised() {
+        assert!(is_this_pc("127.0.0.1".parse().unwrap()));
+        assert!(!is_this_pc("192.0.2.77".parse().unwrap()));
+    }
 
     #[test]
     fn public_key_is_read_from_certificate() {

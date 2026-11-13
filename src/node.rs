@@ -360,6 +360,7 @@ impl Node {
         {
             let mut st = self.state.write();
             f(&mut st.directory, &self.identity.id);
+            st.directory.sign_grants(&self.identity);
         }
         self.save();
         self.broadcast_directory();
@@ -798,7 +799,12 @@ impl Node {
                 if !peer.is_lead || !self.is_approved_lead_peer(&peer.id) {
                     return;
                 }
-                let changed = self.state.write().directory.merge(&d);
+                let changed = {
+                    let mut st = self.state.write();
+                    let src = model::MergeFrom { me: &self.identity.id, from: &peer.id };
+                    // The main PC confirms at once what it has just taken from a lead.
+                    st.directory.merge_from(&d, src) | st.directory.sign_grants(&self.identity)
+                };
                 if changed {
                     self.save();
                     self.broadcast_directory();
@@ -1141,6 +1147,15 @@ pub fn start(identity: Identity, state: LocalState, ui: crate::agent_ui::UiHandl
             ui,
             repaint: Mutex::new(None),
         });
+        // The main PC of a team from an older version confirms what it holds now, once.
+        let signed = {
+            let mut st = node.state.write();
+            st.directory.sign_grants(&node.identity)
+        };
+        if signed {
+            crate::logi!("main PC confirmed roles and rights of the team");
+            node.save();
+        }
         tokio::spawn(node.clone().accept_loop());
         tokio::spawn(node.clone().discovery_loop(socket.clone()));
         tokio::spawn(node.clone().probe_loop(socket));

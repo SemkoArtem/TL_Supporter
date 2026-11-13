@@ -37,6 +37,17 @@ pub fn clear_pin() -> Result<()> {
     Ok(())
 }
 
+/// A lead always works from another PC on the local network. A connection from this PC itself
+/// is refused: an ordinary user here could otherwise make up a team of their own before the
+/// PC joins one and drive the secure screens as SYSTEM. Two copies on one PC for testing are
+/// still allowed, which the copy started by the service never is.
+fn peer_address_allowed(ip: std::net::IpAddr) -> bool {
+    if !net::is_local_address(ip) {
+        return false;
+    }
+    !net::is_this_pc(ip) || crate::util::test_env("TLS_DATA_DIR").is_some()
+}
+
 struct Link {
     conn: quinn::Connection,
     tx: mpsc::UnboundedSender<Msg>,
@@ -59,10 +70,18 @@ impl Secure {
     /// Rights of a lead, only when they may use secure screens on this PC.
     fn allowed(&self, lead: &str) -> Option<Rights> {
         let st = self.state.read();
-        if !st.directory.lead_can_reach(lead, &self.identity.id) {
+        let d = &st.directory;
+        if !d.lead_can_reach(lead, &self.identity.id) {
             return None;
         }
-        st.directory.member(lead).map(|m| m.rights.clone()).filter(|r| r.full_access)
+        let m = d.member(lead)?;
+        // The data file is open to every user here. Once the main PC is remembered, only rights
+        // it confirmed count, and only from that same PC.
+        let owner = self.pin.read().as_ref().map(|p| p.owner_id.clone()).unwrap_or_default();
+        if !owner.is_empty() && (d.owner_id != owner || !d.grant_valid(m)) {
+            return None;
+        }
+        Some(m.rights.clone()).filter(|r| r.full_access)
     }
 
     /// Remember the team the first time this PC has one.
@@ -72,11 +91,22 @@ impl Secure {
         let next = {
             let st = self.state.read();
             let d = &st.directory;
-            let new_pin = model::TeamPin { team_id: d.team_id.clone(), authority_b64: d.authority_public_b64.clone(), signed: d.admin_password_signed_by(&d.authority_public_b64), released: false };
+            // The main PC is remembered the first time it is seen confirming rights.
+            let owner = if d.owner_signs && !d.owner_id.is_empty() && d.member(&d.owner_id).is_some_and(|m| d.grant_valid(m)) { d.owner_id.clone() } else { String::new() };
+            let new_pin = model::TeamPin {
+                team_id: d.team_id.clone(),
+                authority_b64: d.authority_public_b64.clone(),
+                signed: d.admin_password_signed_by(&d.authority_public_b64),
+                released: false,
+                owner_id: owner.clone(),
+            };
             match known {
                 Some(pin) if pin.released && !d.is_empty() && d.team_id != pin.team_id => new_pin,
                 Some(mut pin) => {
                     pin.signed |= d.team_id == pin.team_id && d.admin_password_signed_by(&pin.authority_b64);
+                    if pin.owner_id.is_empty() && d.team_id == pin.team_id {
+                        pin.owner_id = owner;
+                    }
                     pin
                 }
                 None if d.is_empty() => return,
@@ -181,8 +211,8 @@ impl Secure {
     }
 
     async fn run_connection(self: Arc<Self>, conn: quinn::Connection) -> Result<()> {
-        if !net::is_local_address(conn.remote_address().ip()) {
-            bail!("non-local peer refused");
+        if !peer_address_allowed(conn.remote_address().ip()) {
+            bail!("peer address refused");
         }
         let public = net::peer_public_key(&conn)?;
         let lead = secure::device_id(&public);
@@ -257,7 +287,7 @@ impl Secure {
 
     async fn accept_loop(self: Arc<Self>, endpoint: quinn::Endpoint) {
         while let Some(incoming) = endpoint.accept().await {
-            if !net::is_local_address(incoming.remote_address().ip()) {
+            if !peer_address_allowed(incoming.remote_address().ip()) {
                 incoming.refuse();
                 continue;
             }
