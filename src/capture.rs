@@ -355,13 +355,31 @@ fn grab_gdi(rect: (i32, i32, i32, i32), frame: &mut Vec<u8>) -> bool {
     }
 }
 
+/// Threads for scaling and compressing the screen: half of the cores at a lower priority,
+/// so that the employee's own work keeps the rest of the PC.
+fn encode_pool() -> &'static rayon::ThreadPool {
+    static POOL: std::sync::OnceLock<rayon::ThreadPool> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
+        rayon::ThreadPoolBuilder::new()
+            .num_threads((cores / 2).max(1))
+            .thread_name(|i| format!("tls-encode-{i}"))
+            .start_handler(|_| unsafe {
+                use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL};
+                let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+            })
+            .build()
+            .expect("encode thread pool")
+    })
+}
+
 /// Averaging downscale of BGRA by an integer factor.
 pub fn downscale(src: &[u8], w: u32, h: u32, div: u32) -> (Vec<u8>, u32, u32) {
     let (nw, nh) = ((w / div).max(1), (h / div).max(1));
     let mut out = vec![0u8; (nw * nh * 4) as usize];
     let row = (w * 4) as usize;
     let div_us = div as usize;
-    out.par_chunks_mut((nw * 4) as usize).enumerate().for_each(|(y, line)| {
+    encode_pool().install(|| out.par_chunks_mut((nw * 4) as usize).enumerate().for_each(|(y, line)| {
         for x in 0..nw as usize {
             let mut sum = [0u32; 3];
             for sy in 0..div_us {
@@ -379,7 +397,7 @@ pub fn downscale(src: &[u8], w: u32, h: u32, div: u32) -> (Vec<u8>, u32, u32) {
             line[x * 4 + 2] = (sum[2] / n) as u8;
             line[x * 4 + 3] = 255;
         }
-    });
+    }));
     (out, nw, nh)
 }
 
@@ -438,17 +456,19 @@ pub fn diff_and_encode(prev: &mut Vec<u8>, image: &[u8], w: u32, h: u32, tile: u
             prev[start..end].copy_from_slice(&image[start..end]);
         }
     }
-    changed
-        .par_iter()
-        .filter_map(|&(idx, x, y, cw, ch)| {
-            let mut buf = Vec::with_capacity((cw * ch * 4) as usize);
-            for line in y..y + ch {
-                let start = line as usize * row_bytes + x as usize * 4;
-                buf.extend_from_slice(&image[start..start + cw as usize * 4]);
-            }
-            encode_tile(&buf, cw as u16, ch as u16, quality).map(|j| (idx, j))
-        })
-        .collect()
+    encode_pool().install(|| {
+        changed
+            .par_iter()
+            .filter_map(|&(idx, x, y, cw, ch)| {
+                let mut buf = Vec::with_capacity((cw * ch * 4) as usize);
+                for line in y..y + ch {
+                    let start = line as usize * row_bytes + x as usize * 4;
+                    buf.extend_from_slice(&image[start..start + cw as usize * 4]);
+                }
+                encode_tile(&buf, cw as u16, ch as u16, quality).map(|j| (idx, j))
+            })
+            .collect()
+    })
 }
 
 fn process(profile: Profile, state: &mut ProfileState, publisher: &ProfilePub, frame: &[u8], w: u32, h: u32) {
