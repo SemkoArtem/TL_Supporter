@@ -345,7 +345,10 @@ impl Directory {
             signed.grant_ts = now_ms().max(m.grant_ts + 1);
             let Ok(sig) = secure::sign(&identity.pkcs8, &grant_message(&team_id, &signed)) else { continue };
             signed.grant_sig_b64 = secure::b64(&sig);
-            signed.rev = Rev::new(&identity.id);
+            // Newer, so that it spreads, but still naming the lead who made the change: a PC
+            // made a lead trusts that lead without asking.
+            let author = if m.rev.by.is_empty() { identity.id.clone() } else { m.rev.by.clone() };
+            signed.rev = Rev::new(&author);
             *m = signed;
             changed = true;
         }
@@ -383,15 +386,20 @@ impl Directory {
             if cur.is_some_and(|c| v.rev <= c.rev) {
                 continue;
             }
-            let take = !guarded
+            let plain = !guarded
                 || match cur {
-                    None => v.state != MemberState::Approved || self.grant_valid(v) || self.owner_takes(v, None, src),
-                    Some(c) => v.same_grant(c) || (self.grant_valid(v) && v.grant_ts > c.grant_ts) || v.grants_within(c) || self.owner_takes(v, Some(c), src),
+                    None => v.state != MemberState::Approved || self.grant_valid(v),
+                    Some(c) => v.same_grant(c) || (self.grant_valid(v) && v.grant_ts > c.grant_ts) || v.grants_within(c),
                 };
-            if !take {
+            let by_owner = !plain && self.owner_takes(v, cur, src);
+            if !plain && !by_owner {
                 continue;
             }
             let mut next = v.clone();
+            if by_owner {
+                // The author is the lead proven by the connection, whatever the record says.
+                next.rev.by = src.from.to_string();
+            }
             if let Some(c) = cur {
                 if !self.grant_valid(&next) {
                     if next.same_grant(c) && self.grant_valid(c) {

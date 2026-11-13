@@ -355,8 +355,9 @@ fn grab_gdi(rect: (i32, i32, i32, i32), frame: &mut Vec<u8>) -> bool {
     }
 }
 
-/// Threads for scaling and compressing the screen: half of the cores at a lower priority,
-/// so that the employee's own work keeps the rest of the PC.
+/// Threads for scaling and compressing the screen: half of the cores, so that the employee's
+/// own work keeps the rest of the PC. They keep the normal priority: below it Windows can hold
+/// them back for seconds while other programs are busy, and the lead would see no picture.
 fn encode_pool() -> &'static rayon::ThreadPool {
     static POOL: std::sync::OnceLock<rayon::ThreadPool> = std::sync::OnceLock::new();
     POOL.get_or_init(|| {
@@ -364,10 +365,6 @@ fn encode_pool() -> &'static rayon::ThreadPool {
         rayon::ThreadPoolBuilder::new()
             .num_threads((cores / 2).max(1))
             .thread_name(|i| format!("tls-encode-{i}"))
-            .start_handler(|_| unsafe {
-                use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL};
-                let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
-            })
             .build()
             .expect("encode thread pool")
     })

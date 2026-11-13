@@ -381,7 +381,10 @@ impl LeadApp {
     fn session_window(&mut self, ctx: &egui::Context) {
         let Some(id) = self.active.clone() else { return };
         let title = format!("{} - TL Supporter", self.node.member_name(&id));
-        let builder = egui::ViewportBuilder::default().with_title(title).with_inner_size([1280.0, 800.0]).with_min_inner_size([640.0, 400.0]);
+        // Never larger than the screen the console is on, so the window fits on a small one.
+        let screen = ctx.input(|i| i.viewport().monitor_size).unwrap_or(egui::vec2(1280.0, 800.0));
+        let size = [1280.0f32.min(screen.x * 0.9).max(640.0), 800.0f32.min(screen.y * 0.85).max(400.0)];
+        let builder = egui::ViewportBuilder::default().with_title(title).with_inner_size(size).with_min_inner_size([640.0, 400.0]);
         ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("tls-session"), builder, |vctx, _| {
             if vctx.input(|i| i.viewport().close_requested()) {
                 self.close_tab(&id);

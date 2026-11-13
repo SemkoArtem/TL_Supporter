@@ -40,6 +40,31 @@ pub fn request_reset(password: &str) {
     }
 }
 
+/// Asks the running program to show the connection code to leads, so that it keeps doing so
+/// after this window is closed. Without a running program this window does it itself.
+pub const ANNOUNCE_FLAG: &str = "announce.flag";
+
+fn announce_from_program(identity: Identity, code: String, name: String) {
+    let flag = crate::util::data_dir().join(ANNOUNCE_FLAG);
+    if std::fs::write(&flag, &code).is_err() {
+        node::announce_code(identity, code, name, 10);
+        return;
+    }
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(2500));
+        if flag.exists() {
+            let _ = std::fs::remove_file(&flag);
+            node::announce_code(identity, code, name, 10);
+        }
+    });
+}
+
+/// A connection code from the settings window, when it looks like one.
+pub fn announce_request(request: &[u8]) -> Option<String> {
+    let code = String::from_utf8(request.to_vec()).ok()?.trim().to_string();
+    (!code.is_empty() && code.len() <= 32 && code.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')).then_some(code)
+}
+
 /// Ask the running program to close.
 pub fn request_exit(password: &str) {
     if let Ok(sealed) = secure::dpapi_protect_user(password.as_bytes()) {
@@ -351,7 +376,7 @@ impl eframe::App for Settings {
                         None => {
                             if ui.button(tr("Показати код")).clicked() {
                                 let code = secure::generate_join_code();
-                                node::announce_code(self.identity.clone(), code.clone(), me.name.clone(), 10);
+                                announce_from_program(self.identity.clone(), code.clone(), me.name.clone());
                                 self.code = Some(code);
                             }
                         }
@@ -359,7 +384,7 @@ impl eframe::App for Settings {
                 });
                 if self.code.is_some() {
                     ui.weak(tr("Код діє 10 хвилин. Керівник вводить його в «Додати ПК за кодом», щоб перенести цей ПК у групу."));
-                    ui.weak(tr("Не закривай це вікно, поки керівник не введе код."));
+                    ui.weak(tr("Вікно можна закрити: програма показує код керівникам сама."));
                 }
                 if ui.button(tr("Вийти з програми до наступного входу в Windows")).clicked() {
                     request_exit(&self.unlocked_with);

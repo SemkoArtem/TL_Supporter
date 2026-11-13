@@ -69,6 +69,7 @@ const TABLE: &[(&str, &str, &str)] = &[
     ("Зображення", "Picture", "Изображение"),
     ("Слідувати за курсором: показувати монітор, де зараз курсор працівника", "Follow the cursor: show the monitor where the employee's cursor is", "Следовать за курсором: показывать монитор, где сейчас курсор сотрудника"),
     ("Монітор", "Monitor", "Монитор"),
+    ("Вікно можна закрити: програма показує код керівникам сама.", "You can close this window: the program shows the code to leads by itself.", "Окно можно закрыть: программа сама показывает код руководителям."),
     ("Чекає підтвердження головним ПК", "Waiting for the main PC to confirm", "Ждёт подтверждения главным ПК"),
     ("Роль, доступ і права цього ПК інші ПК приймуть, коли головний ПК буде в мережі й підтвердить їх", "The other PCs accept this PC's role, access and rights once the main PC is online and confirms them", "Роль, доступ и права этого ПК другие ПК примут, когда главный ПК будет в сети и подтвердит их"),
     ("Керівники без групи", "Leads without a group", "Руководители без группы"),

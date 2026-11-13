@@ -440,3 +440,17 @@ pub fn run(identity: Identity) -> Result<()> {
         anyhow::Ok(())
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::peer_address_allowed;
+
+    #[test]
+    fn secure_screens_are_not_served_to_this_pc_itself() {
+        if crate::util::test_env("TLS_DATA_DIR").is_none() {
+            assert!(!peer_address_allowed("127.0.0.1".parse().unwrap()));
+        }
+        assert!(!peer_address_allowed("8.8.8.8".parse().unwrap()));
+        assert!(peer_address_allowed("10.255.255.254".parse().unwrap()));
+    }
+}

@@ -78,8 +78,10 @@ fn watch_exit_flag(node: std::sync::Arc<node::Node>) {
         let _ = std::fs::remove_file(&reset);
         let exit = util::data_dir().join(setup_ui::EXIT_FLAG);
         let restart = util::data_dir().join(setup_ui::RESTART_FLAG);
+        let announce = util::data_dir().join(setup_ui::ANNOUNCE_FLAG);
         let _ = std::fs::remove_file(&exit);
         let _ = std::fs::remove_file(&restart);
+        let _ = std::fs::remove_file(&announce);
         let _ = std::fs::remove_file(util::data_dir().join(model::RESET_FILE));
         loop {
             std::thread::sleep(std::time::Duration::from_secs(1));
@@ -94,6 +96,14 @@ fn watch_exit_flag(node: std::sync::Arc<node::Node>) {
             if restart.exists() {
                 let _ = std::fs::remove_file(&restart);
                 service::restart_program();
+            }
+            if announce.exists() {
+                let request = std::fs::read(&announce).unwrap_or_default();
+                let _ = std::fs::remove_file(&announce);
+                if let Some(code) = setup_ui::announce_request(&request) {
+                    crate::logi!("showing the connection code to leads for 10 minutes");
+                    node::announce_code(node.identity.clone(), code, node.my_name(), 10);
+                }
             }
             if reset.exists() {
                 let request = std::fs::read(&reset).unwrap_or_default();
