@@ -152,6 +152,14 @@ pub fn valid_screen(w: u32, h: u32) -> bool {
     w > 0 && h > 0 && w <= 16_384 && h <= 16_384 && w as u64 * h as u64 <= 40_000_000
 }
 
+const MAX_TILE_JPEG: usize = 4 << 20;
+const MAX_THUMB_JPEG: usize = 8 << 20;
+
+/// A tile from the other PC is kept only when it lies inside the screen it announced.
+pub fn tile_fits(screen: (u32, u32), x: u32, y: u32, w: u32, h: u32) -> bool {
+    w > 0 && h > 0 && x as u64 + w as u64 <= screen.0 as u64 && y as u64 + h as u64 <= screen.1 as u64
+}
+
 fn decode_jpeg(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
     use zune_jpeg::zune_core::colorspace::ColorSpace;
     use zune_jpeg::zune_core::options::DecoderOptions;
@@ -324,6 +332,8 @@ impl Node {
         let mut monitor = [0u8; 1];
         s.read_exact(&mut monitor).await?;
         let thumb = kind == proto::UNI_THUMB;
+        // Every tile has to lie inside the size the other PC announced first.
+        let mut size: Option<(u32, u32)> = None;
         loop {
             let mut t = [0u8; 1];
             s.read_exact(&mut t).await?;
@@ -334,6 +344,7 @@ impl Node {
                     if !valid_screen(u16::from_le_bytes([b[0], b[1]]) as u32, u16::from_le_bytes([b[2], b[3]]) as u32) {
                         anyhow::bail!("impossible screen size");
                     }
+                    size = Some((u16::from_le_bytes([b[0], b[1]]) as u32, u16::from_le_bytes([b[2], b[3]]) as u32));
                     if !thumb {
                         let (w, h) = (u16::from_le_bytes([b[0], b[1]]), u16::from_le_bytes([b[2], b[3]]));
                         let mut l = self.lead.lock();
@@ -345,7 +356,8 @@ impl Node {
                     let mut b = [0u8; 8];
                     s.read_exact(&mut b).await?;
                     let len = u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize;
-                    if len > 32 << 20 {
+                    let Some(screen) = size else { anyhow::bail!("tile before the screen size") };
+                    if len > if thumb { MAX_THUMB_JPEG } else { MAX_TILE_JPEG } {
                         anyhow::bail!("tile too large");
                     }
                     let (x, y) = (u16::from_le_bytes([b[4], b[5]]) as u32, u16::from_le_bytes([b[6], b[7]]) as u32);
@@ -353,6 +365,9 @@ impl Node {
                     s.read_exact(&mut jpeg).await?;
                     // Decoding must not hold up the sound and control running on the same threads.
                     let Some((w, h, rgba)) = tokio::task::block_in_place(|| decode_jpeg(&jpeg)) else { continue };
+                    if !tile_fits(screen, x, y, w as u32, h as u32) {
+                        continue;
+                    }
                     let mut l = self.lead.lock();
                     let v = l.targets.entry(peer.id.clone()).or_default();
                     if thumb {
@@ -773,7 +788,7 @@ impl Node {
 
 #[cfg(test)]
 mod screen_size_tests {
-    use super::valid_screen;
+    use super::{tile_fits, valid_screen};
 
     #[test]
     fn only_real_screen_sizes_pass() {
@@ -782,6 +797,17 @@ mod screen_size_tests {
         assert!(!valid_screen(0, 1080));
         assert!(!valid_screen(65535, 65535));
         assert!(!valid_screen(16384, 16384));
+    }
+
+    #[test]
+    fn tiles_outside_the_announced_screen_are_dropped() {
+        let screen = (1920, 1080);
+        assert!(tile_fits(screen, 0, 0, 128, 128));
+        assert!(tile_fits(screen, 1792, 952, 128, 128));
+        assert!(!tile_fits(screen, 1800, 0, 128, 128));
+        assert!(!tile_fits(screen, 0, 1000, 128, 128));
+        assert!(!tile_fits(screen, 65535, 65535, 4096, 4096));
+        assert!(!tile_fits(screen, 0, 0, 0, 10));
     }
 }
 
