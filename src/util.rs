@@ -88,13 +88,30 @@ macro_rules! logi {
     ($($arg:tt)*) => { $crate::util::log_line(&format!($($arg)*)) };
 }
 
+/// The Windows folder, asked from the system rather than taken from the environment.
+pub fn windows_dir() -> PathBuf {
+    let mut buf = [0u16; 260];
+    let n = unsafe { windows::Win32::System::SystemInformation::GetSystemWindowsDirectoryW(Some(&mut buf)) } as usize;
+    if n == 0 || n >= buf.len() {
+        return PathBuf::from(r"C:\Windows");
+    }
+    PathBuf::from(String::from_utf16_lossy(&buf[..n]))
+}
+
+/// A Windows tool by its full path. A short name would first be looked for beside this
+/// program, where someone could have put a file of the same name.
+pub fn system_tool(name: &str) -> PathBuf {
+    windows_dir().join("System32").join(format!("{name}.exe"))
+}
+
 /// Shows the log file in Explorer, so that it can be sent along with a report.
 pub fn open_log() {
     let log = data_dir().join("tlsupporter.log");
+    let explorer = windows_dir().join("explorer.exe");
     let _ = if log.exists() {
-        std::process::Command::new("explorer").arg(format!("/select,{}", log.display())).spawn()
+        std::process::Command::new(explorer).arg(format!("/select,{}", log.display())).spawn()
     } else {
-        std::process::Command::new("explorer").arg(data_dir()).spawn()
+        std::process::Command::new(explorer).arg(data_dir()).spawn()
     };
 }
 

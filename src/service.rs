@@ -246,6 +246,7 @@ fn service_body() -> Result<()> {
 
     let exe = std::env::current_exe()?.to_string_lossy().to_string();
     let _ = std::fs::remove_file(format!("{exe}.old"));
+    allow_restart_after_reported_failure();
     kill_other_copies(&[]);
     let mut child: Option<Child> = None;
     let mut system_child: Option<Child> = None;
@@ -323,12 +324,28 @@ fn service_body() -> Result<()> {
     }
     stop_child(&mut child);
     stop_child(&mut system_child);
-    // A non-zero exit after an update makes Windows restart the service with the new file.
-    handle.set_service_status(status(ServiceState::Stopped, ServiceControlAccept::empty(), if updated { 1 } else { 0 }))?;
     if updated {
+        // Windows restarts a service on its own only when it ends without saying it stopped.
+        // Reporting "stopped" first, as older versions did, left the program off until a reboot.
+        crate::logi!("service ends to start again with the new version");
         std::process::exit(1);
     }
+    handle.set_service_status(status(ServiceState::Stopped, ServiceControlAccept::empty(), 0))?;
     Ok(())
+}
+
+/// Lets Windows restart the service even after it stopped with an error it reported itself.
+/// Run at every start, so that PCs installed by older versions get it too.
+fn allow_restart_after_reported_failure() {
+    let Ok(manager) = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT) else { return };
+    if let Ok(service) = manager.open_service(SERVICE_NAME, ServiceAccess::QUERY_CONFIG | ServiceAccess::CHANGE_CONFIG) {
+        if !service.get_failure_actions_on_non_crash_failures().unwrap_or(false) {
+            match service.set_failure_actions_on_non_crash_failures(true) {
+                Ok(()) => crate::logi!("service set to restart after any failure"),
+                Err(e) => crate::logi!("service restart setting failed: {e}"),
+            }
+        }
+    }
 }
 
 fn is_running() -> bool {
@@ -365,7 +382,7 @@ fn install_dir() -> PathBuf {
 }
 
 fn run(cmd: &str, args: &[&str]) {
-    let _ = std::process::Command::new(cmd).args(args).output();
+    let _ = std::process::Command::new(crate::util::system_tool(cmd)).args(args).output();
 }
 
 /// Copy the program, open the firewall for the local subnet only and register the service.
@@ -413,6 +430,7 @@ pub fn install() -> Result<()> {
     };
     let service = manager.create_service(&info, ServiceAccess::START | ServiceAccess::QUERY_STATUS)?;
     run("sc", &["failure", SERVICE_NAME, "reset=60", "actions=restart/2000/restart/2000/restart/5000"]);
+    run("sc", &["failureflag", SERVICE_NAME, "1"]);
     service.start::<OsString>(&[])?;
     Ok(())
 }
