@@ -231,11 +231,26 @@ pub fn check_and_distribute(node: &Arc<Node>) -> String {
 
 /// Receive an update from a lead over the LAN.
 pub async fn receive_update(mut s: quinn::RecvStream) -> Result<()> {
+    // One file at a time, so several streams cannot hold several copies in memory.
+    static RECEIVING: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+    let Ok(_slot) = RECEIVING.try_acquire() else {
+        let _ = s.stop(0u32.into());
+        return Ok(());
+    };
     let mut len = [0u8; 2];
     s.read_exact(&mut len).await?;
-    let mut version = vec![0u8; u16::from_le_bytes(len) as usize];
+    let len = u16::from_le_bytes(len) as usize;
+    if len > MAX_VERSION_LEN {
+        bail!("update version too long");
+    }
+    let mut version = vec![0u8; len];
     s.read_exact(&mut version).await?;
     let version = String::from_utf8(version)?;
+    // Decided before the file is read: an older or the same version is not even downloaded.
+    if !is_newer(&version, APP_VERSION) {
+        let _ = s.stop(0u32.into());
+        return Ok(());
+    }
     let mut sig = vec![0u8; 64];
     s.read_exact(&mut sig).await?;
     let mut size = [0u8; 8];
@@ -244,17 +259,28 @@ pub async fn receive_update(mut s: quinn::RecvStream) -> Result<()> {
     if size > MAX_SIZE {
         bail!("update too large");
     }
-    let mut exe = vec![0u8; size as usize];
-    s.read_exact(&mut exe).await?;
-    if !is_newer(&version, APP_VERSION) {
-        return Ok(());
-    }
+    let exe = read_in_parts(&mut s, size as usize).await?;
     if !verify_release(&version, &exe, &sig) {
         bail!("bad update signature");
     }
     store_pending(&version, &exe, &sig)?;
     crate::logi!("update {version} received");
     Ok(())
+}
+
+const MAX_VERSION_LEN: usize = 32;
+
+/// Memory grows only with what really arrives, not with the size the sender claims.
+async fn read_in_parts(s: &mut quinn::RecvStream, size: usize) -> Result<Vec<u8>> {
+    const PART: usize = 1024 * 1024;
+    let mut out = Vec::with_capacity(size.min(PART));
+    let mut part = vec![0u8; PART];
+    while out.len() < size {
+        let n = (size - out.len()).min(PART);
+        s.read_exact(&mut part[..n]).await?;
+        out.extend_from_slice(&part[..n]);
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
