@@ -12,15 +12,32 @@ use std::sync::Arc;
 
 pub const EXIT_FLAG: &str = "exit.flag";
 pub const RESTART_FLAG: &str = "restart.flag";
+/// Asks the running program to reset this PC. Holds the admin password like the exit request.
+pub const RESET_FLAG: &str = "reset.flag";
+/// Written by the running program when the service did not let the PC go.
+pub const RESET_FAILED: &str = "reset.failed";
 pub const SETTINGS_TITLE: &str = "TL Supporter Settings";
 pub const EXIT_TITLE: &str = "Close TL Supporter";
 
 /// The data folder is writable by every user, so an exit request has to contain the admin
 /// password itself. It is sealed for this Windows account and the file lives for a second.
 pub fn exit_request_valid(request: &[u8]) -> bool {
-    let Ok(plain) = secure::dpapi_unprotect_user(request) else { return false };
-    let Ok(password) = String::from_utf8(plain) else { return false };
-    model::admin_password_ok(&model::load_state(), &password)
+    admin_password_from(request).is_some()
+}
+
+/// The admin password inside a request from the settings window, when it is the right one.
+pub fn admin_password_from(request: &[u8]) -> Option<String> {
+    let plain = secure::dpapi_unprotect_user(request).ok()?;
+    let password = String::from_utf8(plain).ok()?;
+    model::admin_password_ok(&model::load_state(), &password).then_some(password)
+}
+
+/// The running program does the reset, so that it cannot write the old team back afterwards.
+pub fn request_reset(password: &str) {
+    let _ = std::fs::remove_file(crate::util::data_dir().join(RESET_FAILED));
+    if let Ok(sealed) = secure::dpapi_protect_user(password.as_bytes()) {
+        let _ = std::fs::write(crate::util::data_dir().join(RESET_FLAG), sealed);
+    }
 }
 
 /// Ask the running program to close.
@@ -199,8 +216,11 @@ pub fn run_setup(identity: Identity) -> bool {
 }
 
 struct Settings {
+    identity: Identity,
+    reset_wait: Option<std::time::Instant>,
+    code: Option<String>,
+    help_button: bool,
     id: String,
-    key: theme::KeyView,
     confirm_reset: bool,
     new_name: String,
     voice: f32,
@@ -216,6 +236,19 @@ impl eframe::App for Settings {
     fn update(&mut self, ctx: &egui::Context, _f: &mut eframe::Frame) {
         let st = model::load_state();
         let me = st.directory.member(&self.id).cloned().unwrap_or_default();
+        if let Some(since) = self.reset_wait {
+            ctx.request_repaint_after(std::time::Duration::from_millis(300));
+            if st.directory.is_empty() {
+                self.reset_wait = None;
+                self.message = tr("Дані скинуто, зараз відкриється початкове вікно.").into();
+            } else if crate::util::data_dir().join(RESET_FAILED).exists() {
+                self.reset_wait = None;
+                self.message = tr("Скидання не виконано: служба не підтвердила пароль.").into();
+            } else if since.elapsed() > std::time::Duration::from_secs(20) {
+                self.reset_wait = None;
+                self.message = tr("Програма не відповіла. Перевір, що вона запущена, і спробуй ще раз.").into();
+            }
+        }
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("TL Supporter");
@@ -234,9 +267,6 @@ impl eframe::App for Settings {
                 ui.end_row();
                 ui.label(tr("Група:"));
                 ui.label(tr(&st.directory.group_name(&me.group)));
-                ui.end_row();
-                ui.label(tr("Ключ ПК:"));
-                ui.horizontal(|ui| self.key.show(ui, &self.id));
                 ui.end_row();
                 ui.label(tr("Стан:"));
                 ui.label(match me.state {
@@ -267,6 +297,13 @@ impl eframe::App for Settings {
                 }
                 ui.end_row();
             });
+            ui.add_space(6.0);
+            if theme::toggle(ui, &mut self.help_button, tr("Кнопка допомоги на екрані")).on_hover_text(tr("Вимкнена кнопка з'являється на кілька секунд, коли керівник пише, і лишається, поки є непрочитане")).changed() {
+                crate::agent_ui::save_help_pref(self.help_button);
+            }
+            if ui.button(tr("Відкрити журнал програми")).clicked() {
+                crate::util::open_log();
+            }
             ui.add_space(10.0);
             ui.separator();
             if !self.unlocked {
@@ -305,6 +342,25 @@ impl eframe::App for Settings {
                         self.message = tr("Зараз відкриється консоль керівника.").into();
                     }
                 }
+                ui.horizontal(|ui| {
+                    ui.label(tr("Код підключення:"));
+                    match &self.code {
+                        Some(code) => {
+                            ui.label(RichText::new(code).size(20.0).strong());
+                        }
+                        None => {
+                            if ui.button(tr("Показати код")).clicked() {
+                                let code = secure::generate_join_code();
+                                node::announce_code(self.identity.clone(), code.clone(), me.name.clone(), 10);
+                                self.code = Some(code);
+                            }
+                        }
+                    }
+                });
+                if self.code.is_some() {
+                    ui.weak(tr("Код діє 10 хвилин. Керівник вводить його в «Додати ПК за кодом», щоб перенести цей ПК у групу."));
+                    ui.weak(tr("Не закривай це вікно, поки керівник не введе код."));
+                }
                 if ui.button(tr("Вийти з програми до наступного входу в Windows")).clicked() {
                     request_exit(&self.unlocked_with);
                     self.message = tr("Програму буде закрито.").into();
@@ -313,17 +369,11 @@ impl eframe::App for Settings {
                 if self.confirm_reset {
                     ui.label(tr("Видалити команду і всі налаштування на цьому ПК?"));
                     ui.horizontal(|ui| {
-                        let confirmed = ui.button(tr("Так, скинути")).clicked();
-                        let released = confirmed && model::request_team_release(&self.unlocked_with);
-                        if confirmed && !released {
+                        if ui.button(tr("Так, скинути")).clicked() {
+                            request_reset(&self.unlocked_with);
+                            self.reset_wait = Some(std::time::Instant::now());
                             self.confirm_reset = false;
-                            self.message = tr("Скидання не виконано: служба не підтвердила пароль.").into();
-                        }
-                        if released {
-                            let _ = model::factory_reset();
-                            let _ = std::fs::write(crate::util::data_dir().join(RESTART_FLAG), b"1");
-                            self.confirm_reset = false;
-                            self.message = tr("Дані скинуто, зараз відкриється початкове вікно.").into();
+                            self.message = tr("Скидаю…").into();
                         }
                         if ui.button(tr("Скасувати")).clicked() {
                             self.confirm_reset = false;
@@ -404,7 +454,8 @@ pub fn run_settings(identity: Identity) {
         Box::new(move |cc| {
             theme::apply(&cc.egui_ctx, model::load_state().lead.light_theme);
             let new_name = model::load_state().directory.member(&identity.id).map(|m| m.name.clone()).unwrap_or_default();
-            Ok(Box::new(Settings { new_name, id: identity.id, key: Default::default(), confirm_reset: false, voice: crate::audio::load_voice_volume(), connect_sound: crate::audio::connect_volume(), password: String::new(), unlocked: false, unlocked_with: String::new(), error: String::new(), message: String::new() }))
+            let help_button = crate::agent_ui::help_pref();
+            Ok(Box::new(Settings { help_button, reset_wait: None, code: None, identity: identity.clone(), new_name, id: identity.id, confirm_reset: false, voice: crate::audio::load_voice_volume(), connect_sound: crate::audio::connect_volume(), password: String::new(), unlocked: false, unlocked_with: String::new(), error: String::new(), message: String::new() }))
         }),
     );
 }

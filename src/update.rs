@@ -72,7 +72,7 @@ fn store_pending(version: &str, exe: &[u8], sig: &[u8]) -> Result<()> {
 
 /// Called by the service. Returns the verified file itself: the folder is writable by every
 /// user, so whatever gets installed must be exactly the bytes that were checked.
-pub fn pending_update() -> Option<Vec<u8>> {
+pub fn pending_update() -> Option<(Vec<u8>, Vec<u8>)> {
     let dir = update_dir();
     if std::fs::metadata(dir.join("new.exe")).ok()?.len() > MAX_SIZE {
         return None;
@@ -81,13 +81,23 @@ pub fn pending_update() -> Option<Vec<u8>> {
     let sig = std::fs::read(dir.join("new.sig")).ok()?;
     let version = std::fs::read_to_string(dir.join("new.ver")).ok()?;
     // Only reads: the service runs as SYSTEM and this folder is open to every user.
-    (verify_release(&version, &exe, &sig) && is_newer(&version, APP_VERSION)).then_some(exe)
+    (verify_release(&version, &exe, &sig) && is_newer(&version, APP_VERSION)).then_some((exe, sig))
 }
+
+const OWN_SIG: &str = "own.sig";
 
 /// Run by the user's program: removes an update that is already installed.
 pub fn discard_stale_update() {
     let dir = update_dir();
-    let newer = std::fs::read_to_string(dir.join("new.ver")).is_ok_and(|v| is_newer(v.trim(), APP_VERSION));
+    let version = std::fs::read_to_string(dir.join("new.ver")).unwrap_or_default();
+    let newer = is_newer(version.trim(), APP_VERSION);
+    // The signature of the version now installed is kept, so that this PC can pass it on.
+    // An older service installs the program without it. It is checked again before any use.
+    if version.trim() == APP_VERSION {
+        if let Ok(sig) = std::fs::read(dir.join("new.sig")) {
+            let _ = std::fs::write(dir.join(OWN_SIG), sig);
+        }
+    }
     if !newer {
         for file in ["new.exe", "new.sig", "new.ver"] {
             let _ = std::fs::remove_file(dir.join(file));
@@ -122,31 +132,80 @@ fn github_latest(repo: &str) -> Result<(String, Vec<u8>, Vec<u8>)> {
     Ok((tag, exe, sig))
 }
 
+/// This program's own file and its release signature, when it was installed with one.
+/// A lead gives it to a PC that comes online with an older version.
+pub fn own_release() -> Option<(Arc<Vec<u8>>, Arc<Vec<u8>>)> {
+    static OWN: std::sync::OnceLock<Option<(Arc<Vec<u8>>, Arc<Vec<u8>>)>> = std::sync::OnceLock::new();
+    OWN.get_or_init(|| {
+        let exe_path = std::env::current_exe().ok()?;
+        let exe = std::fs::read(&exe_path).ok()?;
+        let beside = PathBuf::from(format!("{}.sig", exe_path.display()));
+        [beside, update_dir().join(OWN_SIG)]
+            .iter()
+            .filter_map(|p| std::fs::read(p).ok())
+            .find(|sig| verify_release(APP_VERSION, &exe, sig))
+            .map(|sig| (Arc::new(exe), Arc::new(sig)))
+    })
+    .clone()
+}
+
+/// The main PC looks for a new version now and then, without anyone pressing a button.
+pub fn start_auto_check(node: Arc<Node>) {
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(90));
+        loop {
+            let due = {
+                let st = node.state.read();
+                st.directory.owner_id == node.identity.id && st.lead.auto_update
+            };
+            if due {
+                let result = check_and_distribute(&node);
+                crate::logi!("automatic update check: {result}");
+            }
+            std::thread::sleep(std::time::Duration::from_secs(4 * 3600));
+        }
+    });
+}
+
+/// Sends a signed version to one PC. The PC checks the signature before keeping it.
+pub fn send_update_to(node: &Arc<Node>, p: Arc<crate::node::Peer>, version: &str, exe: Arc<Vec<u8>>, sig: Arc<Vec<u8>>) {
+    let version = version.to_string();
+    let node = node.clone();
+    node.clone().runtime.spawn(async move {
+        // A few PCs at a time, so that a whole office coming online does not fill the network.
+        static SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(3);
+        let Ok(_slot) = SLOTS.acquire().await else { return };
+        let result: Result<()> = async {
+            let mut s = p.conn.open_uni().await?;
+            let v = version.as_bytes();
+            let mut header = vec![proto::UNI_UPDATE];
+            header.extend_from_slice(&(v.len() as u16).to_le_bytes());
+            header.extend_from_slice(v);
+            header.extend_from_slice(&sig);
+            header.extend_from_slice(&(exe.len() as u64).to_le_bytes());
+            s.write_all(&header).await?;
+            s.write_all(&exe).await?;
+            s.finish()?;
+            s.stopped().await?;
+            Ok(())
+        }
+        .await;
+        match result {
+            Ok(()) => crate::logi!("version {version} sent to {}", p.id),
+            Err(e) => {
+                crate::logi!("update send to {} failed: {e}", p.id);
+                // Offered again the next time this PC connects.
+                node.forget_offer(&p.id);
+            }
+        }
+    });
+}
+
 fn send_update(node: &Arc<Node>, version: &str, exe: Arc<Vec<u8>>, sig: Arc<Vec<u8>>) -> usize {
     let peers: Vec<_> = node.peers.lock().values().cloned().collect();
     let count = peers.len();
     for p in peers {
-        let (exe, sig, version) = (exe.clone(), sig.clone(), version.to_string());
-        node.runtime.spawn(async move {
-            let result: Result<()> = async {
-                let mut s = p.conn.open_uni().await?;
-                let v = version.as_bytes();
-                let mut header = vec![proto::UNI_UPDATE];
-                header.extend_from_slice(&(v.len() as u16).to_le_bytes());
-                header.extend_from_slice(v);
-                header.extend_from_slice(&sig);
-                header.extend_from_slice(&(exe.len() as u64).to_le_bytes());
-                s.write_all(&header).await?;
-                s.write_all(&exe).await?;
-                s.finish()?;
-                s.stopped().await?;
-                Ok(())
-            }
-            .await;
-            if let Err(e) = result {
-                crate::logi!("update send to {} failed: {e}", p.id);
-            }
-        });
+        send_update_to(node, p, version, exe.clone(), sig.clone());
     }
     count
 }

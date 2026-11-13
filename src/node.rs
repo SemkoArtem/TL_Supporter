@@ -112,6 +112,8 @@ pub struct Node {
     audit_dirty: std::sync::atomic::AtomicBool,
     /// This PC lost its access and is already leaving the team.
     leaving: std::sync::atomic::AtomicBool,
+    /// PCs this lead has already given its newer version to during this run.
+    offered: Mutex<HashSet<String>>,
     /// PCs that lost access and were told so during this run.
     told_revoked: Mutex<HashSet<String>>,
     pub secure_peers: Mutex<HashMap<String, Arc<Peer>>>,
@@ -220,7 +222,20 @@ impl Node {
         crate::service::restart_program();
     }
 
+    /// Asks the service to let this PC go, then resets it. Returns only when the service refused.
+    pub fn leave_team(&self, password: &str) -> bool {
+        if !model::request_team_release(password) {
+            return false;
+        }
+        self.factory_reset()
+    }
+
     pub fn factory_reset(&self) -> ! {
+        // The leads take this PC off their lists.
+        for p in self.peers.lock().values().filter(|p| p.is_lead) {
+            p.send(Msg::LeftTeam);
+        }
+        std::thread::sleep(Duration::from_millis(600));
         // Cleared in memory too, so that no later save brings the old team back.
         *self.state.write() = LocalState::default();
         if let Err(e) = model::factory_reset() {
@@ -398,6 +413,14 @@ impl Node {
             lead: self.my_name(),
             target: target.to_string(),
             action: action.chars().take(500).collect(),
+            target_id: {
+                let st = self.state.read();
+                let mut same = st.directory.members.values().filter(|m| m.name == target);
+                match (same.next(), same.next()) {
+                    (Some(m), None) => m.id.clone(),
+                    _ => String::new(),
+                }
+            },
         };
         {
             {
@@ -410,6 +433,27 @@ impl Node {
         for p in self.peers.lock().values().filter(|p| p.is_lead) {
             p.send(Msg::LogSync(vec![entry.clone()]));
         }
+    }
+
+    /// A PC that was off during an update comes online with an older version: an administrating
+    /// lead gives it the version it runs itself. The PC checks the release signature before installing.
+    fn offer_update(self: &Arc<Self>, peer: &Arc<Peer>) {
+        if !self.is_lead() || !crate::update::is_newer(APP_VERSION, &peer.app_version) {
+            return;
+        }
+        if !self.state.read().directory.member(&self.identity.id).is_some_and(|m| m.rights.admin) {
+            return;
+        }
+        let Some((exe, sig)) = crate::update::own_release() else { return };
+        if !self.offered.lock().insert(peer.id.clone()) {
+            return;
+        }
+        crate::logi!("giving version {APP_VERSION} to {} that runs {}", peer.id, peer.app_version);
+        crate::update::send_update_to(self, peer.clone(), APP_VERSION, exe, sig);
+    }
+
+    pub fn forget_offer(&self, id: &str) {
+        self.offered.lock().remove(id);
     }
 
     fn is_approved_lead_peer(&self, id: &str) -> bool {
@@ -677,6 +721,7 @@ impl Node {
         if self.is_lead() {
             self.lead_target_connected(&peer);
         }
+        self.offer_update(&peer);
         request_repaint(&self);
 
         let dgram_node = self.clone();
@@ -694,8 +739,11 @@ impl Node {
             while let Ok(stream) = uni_conn.accept_uni().await {
                 let (n, p) = (uni_node.clone(), uni_peer.clone());
                 tokio::spawn(async move {
+                    // A picture stream simply ending is normal and is not written to the log.
                     if let Err(e) = n.on_uni_stream(p, stream).await {
-                        crate::logi!("stream ended: {e}");
+                        if !e.to_string().contains("finished early") {
+                            crate::logi!("stream ended: {e}");
+                        }
                     }
                 });
             }
@@ -935,6 +983,17 @@ impl Node {
         };
         // A checked code answers repeated requests, because a UDP reply can get lost.
         let known = checked && self.state.read().directory.member(&id).is_some_and(|m| m.state == MemberState::Approved);
+        // A PC already in the team that shows its code is moved into the chosen group and keeps its role.
+        if known && self.state.read().directory.member(&id).is_some_and(|m| m.group != group) {
+            let (mid, gr) = (id.clone(), group.clone());
+            self.update_directory(|d, me| {
+                if let Some(m) = d.members.get_mut(&mid) {
+                    m.group = gr;
+                    m.rev = Rev::new(me);
+                }
+            });
+            self.audit_log(&name, "Переміщено в групу");
+        }
         if !known {
             let (nid, pb, nm, gr) = (id.clone(), public_b64, name.clone(), group);
             self.update_directory(|d, me| {
@@ -1020,6 +1079,7 @@ async fn read_hello(recv: &mut quinn::RecvStream) -> Result<Hello> {
 
 async fn bind_discovery(port: u16) -> Result<Arc<UdpSocket>> {
     let std_socket = std::net::UdpSocket::bind(("0.0.0.0", port))?;
+    net::ignore_unreachable(&std_socket);
     std_socket.set_broadcast(true)?;
     std_socket.set_nonblocking(true)?;
     Ok(Arc::new(UdpSocket::from_std(std_socket)?))
@@ -1032,6 +1092,7 @@ pub fn start(identity: Identity, state: LocalState, ui: crate::agent_ui::UiHandl
     let cfg = NetConfig::from_env();
     crate::audio::set_devices(&state.lead.mic_device, &state.lead.speaker_device);
     crate::audio::set_mic_gain(state.lead.mic_gain);
+    crate::lead_core::set_mix(state.lead.mix_agent, state.lead.mix_system);
     let is_lead = state.directory.is_approved_lead(&identity.id);
     state.directory.observe_stamps();
     let node = handle.block_on(async {
@@ -1051,6 +1112,7 @@ pub fn start(identity: Identity, state: LocalState, ui: crate::agent_ui::UiHandl
             console_started: std::sync::atomic::AtomicU8::new(0),
             audit_dirty: std::sync::atomic::AtomicBool::new(false),
             leaving: std::sync::atomic::AtomicBool::new(false),
+            offered: Mutex::new(HashSet::new()),
             told_revoked: Mutex::new(HashSet::new()),
             secure_peers: Mutex::new(HashMap::new()),
             secure_dialing: Mutex::new(HashSet::new()),
@@ -1073,6 +1135,20 @@ pub fn start(identity: Identity, state: LocalState, ui: crate::agent_ui::UiHandl
     Ok(node)
 }
 
+/// Offers this PC under a code for some minutes, so that a lead can move it into a group.
+pub fn announce_code(identity: Identity, code: String, name: String, minutes: u64) {
+    std::thread::spawn(move || {
+        let until = std::time::Instant::now() + Duration::from_secs(minutes * 60);
+        while std::time::Instant::now() < until {
+            if try_join(&identity, &code, &name, 1).is_ok() {
+                crate::logi!("join code accepted by a lead");
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(300));
+        }
+    });
+}
+
 /// Used by the first-run window: ask a lead on the network to accept this PC by code.
 pub fn join_with_code(identity: &Identity, code: &str, name: &str) -> Result<Directory> {
     try_join(identity, code, name, 8)
@@ -1083,6 +1159,7 @@ pub fn try_join(identity: &Identity, code: &str, name: &str, rounds: u32) -> Res
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     runtime.block_on(async {
         let socket = UdpSocket::bind(("0.0.0.0", 0)).await?;
+        net::ignore_unreachable(&socket);
         socket.set_broadcast(true)?;
         let cfg = NetConfig::from_env();
         let public_b64 = secure::b64(&identity.public);

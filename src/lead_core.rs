@@ -2,7 +2,7 @@
 
 use crate::audio::{self, CaptureKind, Player};
 use crate::node::{request_repaint, JoinCode, Node, Peer};
-use crate::model::{Rev, Role};
+use crate::model::{MemberState, Rev, Role};
 use crate::proto::{self, DrawOp, InputEv, LeadActivity, Mode, MonitorInfo, Msg, ScreenLevel, Tool};
 use crate::secure;
 use crate::sysutil;
@@ -10,7 +10,7 @@ use crate::util::{color_for, now_ms};
 use anyhow::Result;
 use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -82,8 +82,9 @@ pub struct TargetView {
 impl TargetView {
     /// What the employee's PC is asked for, which differs from `mode` while out of sight.
     fn wire_mode(&self) -> Mode {
-        if self.parked && self.mode.screen != ScreenLevel::Off {
-            Mode { screen: ScreenLevel::Off, parked: true, ..self.mode }
+        // Out of sight means no picture and no sound in either direction.
+        if self.parked && (self.mode.screen != ScreenLevel::Off || self.mode.listen) {
+            Mode { screen: ScreenLevel::Off, listen: false, parked: true, ..self.mode }
         } else {
             self.mode
         }
@@ -127,6 +128,15 @@ pub struct LeadInner {
 struct VoiceRun {
     stop: Arc<AtomicBool>,
     target: Arc<Mutex<Option<quinn::Connection>>>,
+}
+
+/// How loud this lead hears the employee's microphone and computer sound, as f32 bits.
+static MIX_AGENT: AtomicU32 = AtomicU32::new(0x3F80_0000);
+static MIX_SYSTEM: AtomicU32 = AtomicU32::new(0x3F80_0000);
+
+pub fn set_mix(agent: f32, system: f32) {
+    MIX_AGENT.store(agent.to_bits(), Ordering::Relaxed);
+    MIX_SYSTEM.store(system.to_bits(), Ordering::Relaxed);
 }
 
 pub static MIC_OPEN: AtomicBool = AtomicBool::new(false);
@@ -255,6 +265,17 @@ impl Node {
                     h.taken_by = name;
                 }
             }
+            Msg::LeftTeam => {
+                drop(l);
+                let member = self.state.read().directory.member(&peer.id).is_some_and(|m| m.state != MemberState::Revoked);
+                if member {
+                    let name = self.member_name(&peer.id);
+                    self.revoke_member(&peer.id);
+                    self.audit_log(&name, "ПК вийшов із команди");
+                }
+                request_repaint(self);
+                return;
+            }
             Msg::Clipboard(text) => {
                 let active = l.active.as_deref() == Some(&peer.id);
                 let controlling = l.targets.get(&peer.id).map(|t| t.control_holder == self.identity.id).unwrap_or(false);
@@ -275,13 +296,11 @@ impl Node {
     }
 
     pub fn lead_on_audio(self: &Arc<Self>, peer: &Arc<Peer>, source: u8, sender: u32, seq: u16, opus: &[u8]) {
-        let gain = {
-            let st = self.state.read();
-            match source {
-                proto::SRC_AGENT_MIC => st.lead.mix_agent,
-                proto::SRC_AGENT_SYSTEM => st.lead.mix_system,
-                _ => 1.0,
-            }
+        // Read without locks: a moving volume slider must not hold up the sound.
+        let gain = match source {
+            proto::SRC_AGENT_MIC => f32::from_bits(MIX_AGENT.load(Ordering::Relaxed)),
+            proto::SRC_AGENT_SYSTEM => f32::from_bits(MIX_SYSTEM.load(Ordering::Relaxed)),
+            _ => 1.0,
         };
         let mut l = self.lead.lock();
         if l.console_locked {
@@ -294,7 +313,7 @@ impl Node {
             t.last_audio_ms = now_ms();
         }
         if l.player.is_none() {
-            l.player = Some(Player::new());
+            l.player = Some(Player::for_lead());
         }
         let key = (secure::short_id(&peer.id) as u64) << 32 | (source as u64) << 24 | (sender as u64 & 0xFF_FFFF);
         if l.audio_logged & (1 << source.min(7)) == 0 { l.audio_logged |= 1 << source.min(7); crate::logi!("first audio packet source={source}"); }
@@ -530,6 +549,9 @@ impl Node {
 
     /// Shows short rings at the place the lead clicked.
     pub fn lead_send_tap(&self, target: &str, x: f32, y: f32) {
+        if !self.state.read().lead.show_taps {
+            return;
+        }
         let monitor = self.lead.lock().targets.get(target).map(|t| t.mode.monitor).unwrap_or(0);
         if let Some(p) = self.peer(target) {
             p.send(Msg::Tap { monitor, x, y });

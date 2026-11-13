@@ -88,6 +88,16 @@ macro_rules! logi {
     ($($arg:tt)*) => { $crate::util::log_line(&format!($($arg)*)) };
 }
 
+/// Shows the log file in Explorer, so that it can be sent along with a report.
+pub fn open_log() {
+    let log = data_dir().join("tlsupporter.log");
+    let _ = if log.exists() {
+        std::process::Command::new("explorer").arg(format!("/select,{}", log.display())).spawn()
+    } else {
+        std::process::Command::new("explorer").arg(data_dir()).spawn()
+    };
+}
+
 pub fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }

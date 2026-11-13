@@ -209,7 +209,7 @@ fn check_child(child: &mut Option<Child>, session: u32) -> Option<Ended> {
 }
 
 fn apply_update(exe: &str) -> bool {
-    let Some(verified) = crate::update::pending_update() else { return false };
+    let Some((verified, sig)) = crate::update::pending_update() else { return false };
     // Written next to the program, where ordinary users cannot change it.
     let (new, old) = (format!("{exe}.new"), format!("{exe}.old"));
     if std::fs::write(&new, verified).is_err() {
@@ -225,6 +225,8 @@ fn apply_update(exe: &str) -> bool {
         let _ = std::fs::rename(&old, exe);
         return false;
     }
+    // Kept beside the program, so that it can pass this version on to PCs that were off.
+    let _ = std::fs::write(format!("{exe}.sig"), sig);
     crate::logi!("update installed");
     true
 }
@@ -378,6 +380,13 @@ pub fn install() -> Result<()> {
     let current = std::env::current_exe()?;
     if current != target {
         std::fs::copy(&current, &target)?;
+        // The release signature lets this PC pass its version on to PCs that were off.
+        let (sig_from, sig_to) = (PathBuf::from(format!("{}.sig", current.display())), dir.join("TLSupporter.exe.sig"));
+        if sig_from.exists() {
+            let _ = std::fs::copy(&sig_from, &sig_to);
+        } else {
+            let _ = std::fs::remove_file(&sig_to);
+        }
     }
     let data = data_dir();
     run("icacls", &[&data.to_string_lossy(), "/grant", "*S-1-5-32-545:(OI)(CI)M", "/T", "/Q"]);

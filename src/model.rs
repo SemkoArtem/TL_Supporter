@@ -95,6 +95,8 @@ pub struct Group {
     pub id: String,
     pub name: String,
     pub deleted: bool,
+    /// The leads turned the help button off for the employees of this group.
+    pub help_hidden: bool,
     pub rev: Rev,
 }
 
@@ -213,7 +215,7 @@ impl Directory {
         let group_id = secure::b64(&secure::random_bytes::<6>());
         d.groups.insert(
             group_id.clone(),
-            Group { id: group_id, name: "Основна".into(), deleted: false, rev: Rev::new(&identity.id) },
+            Group { id: group_id, name: "Основна".into(), deleted: false, help_hidden: false, rev: Rev::new(&identity.id) },
         );
         let set_id = secure::b64(&secure::random_bytes::<6>());
         d.phrases.insert(
@@ -533,6 +535,8 @@ pub struct LogEntry {
     pub lead: String,
     pub target: String,
     pub action: String,
+    /// The PC the entry is about, so that a lead sees only the journal of their own groups.
+    pub target_id: String,
 }
 
 /// Settings of one lead console.
@@ -567,6 +571,14 @@ pub struct LeadSettings {
     pub do_not_disturb: bool,
     /// PCs whose help requests this lead does not want.
     pub muted_help: Vec<String>,
+    /// The console asks for its password as soon as the program opens.
+    pub lock_on_start: bool,
+    /// A session opens in a window of its own.
+    pub session_window: bool,
+    /// The employee sees rings where the lead clicks.
+    pub show_taps: bool,
+    /// The main PC looks for a new version by itself.
+    pub auto_update: bool,
 }
 
 impl Default for LeadSettings {
@@ -596,6 +608,10 @@ impl Default for LeadSettings {
             speaker_device: String::new(),
             do_not_disturb: false,
             muted_help: Vec::new(),
+            lock_on_start: true,
+            session_window: false,
+            show_taps: true,
+            auto_update: true,
         }
     }
 }

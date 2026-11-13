@@ -386,6 +386,7 @@ pub fn run(identity: Identity) -> Result<()> {
     runtime.block_on(async move {
         let endpoint = net::create_endpoint(&identity, cfg.secure_quic_port)?;
         let bound = std::net::UdpSocket::bind(SocketAddr::from(([0, 0, 0, 0], cfg.secure_discovery_port)))?;
+        net::ignore_unreachable(&bound);
         bound.set_nonblocking(true)?;
         let socket = UdpSocket::from_std(bound)?;
         let (input, input_rx) = std_mpsc::channel();

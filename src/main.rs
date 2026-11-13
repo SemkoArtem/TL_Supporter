@@ -72,8 +72,10 @@ fn open_settings(identity: Identity) {
 }
 
 /// Exit quietly when the settings window asks for it.
-fn watch_exit_flag() {
-    std::thread::spawn(|| {
+fn watch_exit_flag(node: std::sync::Arc<node::Node>) {
+    std::thread::spawn(move || {
+        let reset = util::data_dir().join(setup_ui::RESET_FLAG);
+        let _ = std::fs::remove_file(&reset);
         let exit = util::data_dir().join(setup_ui::EXIT_FLAG);
         let restart = util::data_dir().join(setup_ui::RESTART_FLAG);
         let _ = std::fs::remove_file(&exit);
@@ -92,6 +94,15 @@ fn watch_exit_flag() {
             if restart.exists() {
                 let _ = std::fs::remove_file(&restart);
                 service::restart_program();
+            }
+            if reset.exists() {
+                let request = std::fs::read(&reset).unwrap_or_default();
+                let _ = std::fs::remove_file(&reset);
+                if let Some(password) = setup_ui::admin_password_from(&request) {
+                    // Returns only when the service refused to let the PC go.
+                    node.leave_team(&password);
+                }
+                let _ = std::fs::write(util::data_dir().join(setup_ui::RESET_FAILED), b"1");
             }
         }
     });
@@ -112,8 +123,9 @@ fn run_app(identity: Identity) -> Result<()> {
     if node.state.read().console_mode(&node.identity.id) != is_lead {
         crate::service::restart_program();
     }
-    watch_exit_flag();
+    watch_exit_flag(node.clone());
     if is_lead {
+        update::start_auto_check(node.clone());
         let ui_node = node.clone();
         std::thread::spawn(move || agent_ui::run(ui_node, rx, ui_handle, true));
         let options = eframe::NativeOptions {
@@ -179,12 +191,20 @@ fn real_main() -> Result<()> {
             Some("--dev-employee-mode") => return devtest::employee_mode(&args[1]),
             Some("--dev-set-role") => return devtest::set_role(identity, &args[1]),
             Some("--dev-park") => return devtest::park(identity),
+            Some("--dev-audio-restart") => return devtest::audio_restart(identity),
             Some("--dev-factory-reset") => return devtest::factory_reset_request(&args[1]),
             Some("--dev-release-worker") => return devtest::release_worker(args[1].parse()?),
             Some("--dev-request-exit") => {
                 setup_ui::request_exit(&args[1]);
                 return Ok(());
             }
+            Some("--dev-request-reset") => {
+                setup_ui::request_reset(&args[1]);
+                return Ok(());
+            }
+            Some("--dev-announce") => return devtest::announce(&identity, &args[1]),
+            Some("--dev-code-move") => return devtest::code_move(identity, &args[1], args.get(2).map(String::as_str) == Some("lead")),
+            Some("--dev-watch") => return devtest::watch(identity, args[1].parse()?),
             Some("--dev-code-wait") => return devtest::code_wait(&identity, &args[1], &args[2]),
             Some("--dev-code-add") => return devtest::code_add(identity, &args[1]),
             _ => {}
@@ -248,6 +268,8 @@ fn real_main() -> Result<()> {
 }
 
 fn main() {
+    // A crash would otherwise leave no trace: the program has no console.
+    std::panic::set_hook(Box::new(|info| logi!("crash: {info}")));
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }

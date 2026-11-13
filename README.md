@@ -11,7 +11,7 @@ talk into their headset, send text and take over the mouse and keyboard when nee
 
 Requirements: Windows 10 version 2004 or later, Windows 11. A single file, `TLSupporter.exe`.
 
-Status: version 0.2 for testing. There is no license yet, all rights are reserved.
+Status: version 0.3 for testing. There is no license yet, all rights are reserved.
 The program is free of charge, a free license is planned for later.
 
 ### Features
@@ -26,12 +26,19 @@ The program is free of charge, a free license is planned for later.
 - Mouse and keyboard control that the lead turns on and off at will. Text in the clipboard is shared only while the lead controls the PC. The lead has a mixer for the employee's microphone and the computer sound, the employee can set the volume of the lead's voice or mute it.
 - Full access on the lock screen, the sign-in screen and administrator windows, as a separate right for each lead.
 - Lead rights, an action journal, console lock and auto-lock, an admin password on the employee's PC.
+- Every lead sets a console password of their own on the first start, the team admin password works as a reserve. The console can lock when the program starts, and Enter unlocks it.
+- A lead without the Administration right sees the journal of their own groups only.
+- The main PC always sees the lead PCs that have no group yet, in "Керівники без групи" (leads without a group).
+- The help button can be turned off for a whole group (the "?" button in the group header) or by the employee in their settings. When it is off, it appears for about 20 seconds after a lead's hint and stays while something is unread or a request waits.
+- A session can open in a separate window. The session toolbar has a separate button for the picture, and the click rings can be turned off.
+- Settings show the connection code of the PC behind the team admin password, on employee and lead PCs. A lead types it into "Додати ПК за кодом" to move a PC that is already in the team into another group, and the PC keeps its role.
+- The version is shown in the console, next to every PC, in the employee's tray tooltip and settings.
 - Adding a PC with a one-time code. An employee's PC can be made a lead with the team admin password. Only the main PC, the one that created the team, can give a lead the Administration right. When a lead revokes a PC's access, the program on that PC resets itself and shows a join code again. A factory reset releases the PC from its team. A PC that was reset with version 0.1.3 or older needs `TLSupporter.exe --clear-secure-pin`, run as administrator, before it joins another team.
 - Autostart as a Windows service, the employee sees only a tray icon.
 - The close button hides the program to the tray and ends the open sessions. The minimize button keeps it on the taskbar. It closes completely only from the tray menu or settings, with the team admin password.
 - A lead's PC can switch to employee mode and back with the team admin password.
 - Dark interface in English, Ukrainian or Russian. A light theme is available in the settings.
-- Updates: a lead's PC downloads a signed version from GitHub and distributes it over the local network.
+- Updates: the main PC checks GitHub by itself several times a day, downloads a signed version and distributes it over the local network. A PC that was off gets the new version from a lead with the Administration right as soon as it comes online. Every PC checks the release signature before installing.
 
 ### How it works
 
@@ -48,8 +55,10 @@ control, voice, computer sound, the secure channel on a simulated lock, promotio
 and attacks on the network protocol and on the data files.
 Tested on one real PC with an earlier version: service installation, SYSTEM process, firewall rule, restart after the program is killed.
 
-Not yet tested: two real computers, the service of version 0.2, real lock and sign-in screens and administrator windows,
-drawing and control over full-screen mstsc, the built-in update.
+Also tested with copies on one PC: version 0.3.0 passed to a PC that still runs 0.2.0, refused without a valid signature, factory reset through the running program with the leads told about it, moving a PC into another group by its code.
+
+Not yet tested: two real computers, the service of version 0.3, real lock and sign-in screens and administrator windows,
+drawing and control over full-screen mstsc, the automatic check against GitHub on a real main PC.
 
 ### Installation
 
@@ -121,12 +130,12 @@ The team and settings stay in `C:\ProgramData\TLSupporter`. To erase them too:
 
 #### Factory reset
 
-Needed when a PC already belongs to a team, for example when it was set up as a lead by mistake. On a lead's PC: Налаштування (Settings) → Блокування і паролі (Lock and passwords) → Скидання до заводських (factory reset). On an employee's PC: tray icon → Налаштування (Settings) → admin password. The team, PC list, journal and settings are erased from this PC, its key stays, and the first-run window opens.
+Needed when a PC already belongs to a team, for example when it was set up as a lead by mistake. On a lead's PC: Налаштування (Settings) → Блокування і паролі (Lock and passwords) → Скидання до заводських (factory reset). On an employee's PC: tray icon → Налаштування (Settings) → admin password. The running program does the reset itself and tells the leads, who take the PC off their lists. The team, PC list, journal and settings are erased from this PC, its key stays, and the first-run window opens.
 
 #### If something goes wrong
 
 - Defender blocked it: Windows Security → Protection history. Check that step 1 was done and install again.
-- The program log is `C:\ProgramData\TLSupporter\tlsupporter.log`, the service log is `C:\Program Files\TLSupporterData\system.log`.
+- The program log is `C:\ProgramData\TLSupporter\tlsupporter.log`. The button "Відкрити журнал програми" (open the program log) in the settings shows it. The service log is `C:\Program Files\TLSupporterData\system.log`.
 
 Network: UDP 47700–47703, the firewall rule is added for the local subnet only.
 
@@ -148,9 +157,9 @@ Output: `target\release\TLSupporter.exe`.
 The private signing key is kept outside the project: `%USERPROFILE%\.tlsupporter\release_private.key`.
 Updates cannot be published without it, so keep a backup.
 
-    TLSupporter.exe --sign-release TLSupporter.exe %USERPROFILE%\.tlsupporter\release_private.key 0.2.0
+    TLSupporter.exe --sign-release TLSupporter.exe %USERPROFILE%\.tlsupporter\release_private.key 0.3.0
 
-Upload `TLSupporter.exe` and `TLSupporter.exe.sig` to a GitHub Release tagged `v0.2.0`.
+Upload `TLSupporter.exe` and `TLSupporter.exe.sig` to a GitHub Release tagged `v0.3.0`.
 The program looks for releases in `SemkoArtem/TL_Supporter` unless another `owner/name` is set in the settings.
 Add new protocol fields only in a way that older versions can ignore them (see `src/proto.rs`).
 
@@ -172,7 +181,7 @@ The "client hears" mode needs a signed virtual microphone driver. Its button in 
 
 Вимоги: Windows 10 версії 2004 або новіша, Windows 11. Один файл `TLSupporter.exe`.
 
-Стан: версія 0.2 для тестування. Ліцензії поки немає, усі права застережено.
+Стан: версія 0.3 для тестування. Ліцензії поки немає, усі права застережено.
 Програма безкоштовна, вільну ліцензію планується додати пізніше.
 
 ### Можливості
@@ -187,12 +196,19 @@ The "client hears" mode needs a signed virtual microphone driver. Its button in 
 - Керування мишею і клавіатурою, яке керівник вмикає і вимикає сам. Текст у буфері обміну спільний лише під час керування. У керівника є мікшер мікрофона працівника і звуку системи, працівник може змінити гучність голосу керівника або вимкнути його.
 - Повний доступ на екрані блокування, екрані входу і у вікнах адміністратора, окреме право для кожного керівника.
 - Права керівників, журнал дій, блокування консолі й автоблокування, адмінський пароль на ПК працівника.
+- Кожен керівник під час першого запуску задає власний пароль консолі, адмінський пароль команди підходить як запасний. Консоль може блокуватися під час запуску програми, Enter розблоковує.
+- Керівник без права «Адміністрування» бачить журнал лише своїх груп.
+- Головний ПК завжди бачить ПК керівників, яких ще не додано в групу, у розділі «Керівники без групи».
+- Кнопку допомоги можна вимкнути для всієї групи (кнопка «?» у заголовку групи) або працівнику в його налаштуваннях. Вимкнена кнопка з'являється приблизно на 20 секунд після підказки керівника і лишається, поки є непрочитане або запит чекає.
+- Сеанс можна відкривати в окремому вікні. На панелі сеансу є окрема кнопка зображення, кільця кліків можна вимкнути.
+- У налаштуваннях за адмінським паролем команди видно код підключення ПК, і на ПК працівника, і на ПК керівника. Керівник вводить його в «Додати ПК за кодом», щоб перенести ПК, який уже в команді, в іншу групу. Роль ПК при цьому зберігається.
+- Версію програми видно в консолі, біля кожного ПК, у підказці значка в треї і в налаштуваннях працівника.
 - Додавання ПК за одноразовим кодом. ПК працівника можна зробити керівником за адмінським паролем команди. Право «Адміністрування» дає лише головний ПК, той, що створив команду. Коли керівник скасовує доступ ПК, програма на ньому сама скидається і знову показує код для приєднання. Скидання до заводських звільняє ПК від команди. Для ПК, скинутого у версії 0.1.3 або старішій, перед приєднанням до іншої команди запусти від адміністратора `TLSupporter.exe --clear-secure-pin`.
 - Автозапуск як служба Windows, у працівника лише значок у треї.
 - Хрестик ховає програму в трей і завершує відкриті сеанси. Кнопка згортання лишає її на панелі задач. Повністю вона закривається лише через меню значка в треї або налаштування, з адмінським паролем команди.
 - ПК керівника можна перевести в режим працівника і повернути назад з адмінським паролем команди.
 - Темний інтерфейс англійською, українською або російською. Світла тема вмикається в налаштуваннях.
-- Оновлення: ПК керівника завантажує підписану версію з GitHub і роздає її в локальній мережі.
+- Оновлення: головний ПК сам кілька разів на день перевіряє GitHub, завантажує підписану версію і роздає її в локальній мережі. ПК, що був вимкнений, отримує нову версію від керівника з правом «Адміністрування», щойно з'явиться в мережі. Кожен ПК перевіряє підпис випуску перед встановленням.
 
 ### Як це влаштовано
 
@@ -209,8 +225,10 @@ The "client hears" mode needs a signed virtual microphone driver. Its button in 
 а також атаки на мережевий протокол і файли даних.
 Перевірено на одному реальному ПК зі старішою версією: встановлення служби, процес SYSTEM, правило брандмауера, перезапуск після примусового закриття.
 
-Ще не перевірено: два реальні комп'ютери, служба версії 0.2, справжні екрани блокування, входу і вікна адміністратора,
-малюнки й керування поверх mstsc на весь екран, вбудоване оновлення.
+Також перевірено копіями на одному ПК: передача версії 0.3.0 на ПК, де ще працює 0.2.0, відмова без дійсного підпису, скидання до заводських через працюючу програму з повідомленням керівникам, перенесення ПК в іншу групу за його кодом.
+
+Ще не перевірено: два реальні комп'ютери, служба версії 0.3, справжні екрани блокування, входу і вікна адміністратора,
+малюнки й керування поверх mstsc на весь екран, автоматична перевірка GitHub на реальному головному ПК.
 
 ### Встановлення
 
@@ -282,12 +300,12 @@ The "client hears" mode needs a signed virtual microphone driver. Its button in 
 
 #### Скидання до заводських
 
-Потрібне, якщо ПК уже належить до команди, наприклад його випадково налаштували як ПК керівника. На ПК керівника: Налаштування → Блокування і паролі → Скидання до заводських. На ПК працівника: значок у треї → Налаштування → адмінський пароль. З цього ПК стираються команда, список ПК, журнал і налаштування, ключ ПК лишається, і відкривається початкове вікно.
+Потрібне, якщо ПК уже належить до команди, наприклад його випадково налаштували як ПК керівника. На ПК керівника: Налаштування → Блокування і паролі → Скидання до заводських. На ПК працівника: значок у треї → Налаштування → адмінський пароль. Скидання виконує сама працююча програма і повідомляє керівникам, які прибирають ПК зі своїх списків. З цього ПК стираються команда, список ПК, журнал і налаштування, ключ ПК лишається, і відкривається початкове вікно.
 
 #### Якщо щось пішло не так
 
 - Defender заблокував: Безпека Windows → Журнал захисту. Перевір, що крок 1 виконано, і встанови знову.
-- Журнал програми: `C:\ProgramData\TLSupporter\tlsupporter.log`, журнал служби: `C:\Program Files\TLSupporterData\system.log`.
+- Журнал програми: `C:\ProgramData\TLSupporter\tlsupporter.log`, його відкриває кнопка «Відкрити журнал програми» в налаштуваннях. Журнал служби: `C:\Program Files\TLSupporterData\system.log`.
 
 Мережа: UDP 47700–47703, правило брандмауера додається лише для локальної підмережі.
 
@@ -309,9 +327,9 @@ The "client hears" mode needs a signed virtual microphone driver. Its button in 
 Закритий ключ підпису лежить поза проєктом: `%USERPROFILE%\.tlsupporter\release_private.key`.
 Без нього оновлення випустити неможливо, тому зроби його резервну копію.
 
-    TLSupporter.exe --sign-release TLSupporter.exe %USERPROFILE%\.tlsupporter\release_private.key 0.2.0
+    TLSupporter.exe --sign-release TLSupporter.exe %USERPROFILE%\.tlsupporter\release_private.key 0.3.0
 
-Завантаж `TLSupporter.exe` і `TLSupporter.exe.sig` у GitHub Release із тегом `v0.2.0`.
+Завантаж `TLSupporter.exe` і `TLSupporter.exe.sig` у GitHub Release із тегом `v0.3.0`.
 Програма шукає випуски в `SemkoArtem/TL_Supporter`, якщо в налаштуваннях не вказано інший `власник/назва`.
 Нові поля в протоколі додавай лише так, щоб старі версії могли їх ігнорувати (див. `src/proto.rs`).
 

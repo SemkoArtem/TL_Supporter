@@ -111,11 +111,16 @@ pub struct LeadApp {
     member_dialog: Option<MemberDialog>,
     draft: SettingsDraft,
     locked: bool,
+    /// This lead has not chosen a console password of their own yet.
+    need_password: bool,
+    own_pw: (String, String),
+    own_pw_error: String,
+    code_pw: String,
+    shown_code: Option<(String, std::time::Instant)>,
     unlock_input: String,
     nav_open: bool,
     nav_peek: bool,
     opened_maximized: bool,
-    key_view: theme::KeyView,
     unlock_error: bool,
     last_tick: std::time::SystemTime,
     was_win_locked: bool,
@@ -164,6 +169,14 @@ impl LeadApp {
             let st = node.state.read();
             (st.directory.policy.help_reasons.iter().map(|r| tr(r)).collect::<Vec<_>>().join("\n"), st.directory.policy.update_repo.clone(), st.lead.personal_phrases.join("\n"))
         };
+        let (need_password, start_locked) = {
+            let st = node.state.read();
+            let own = !st.lead.console_password.is_empty();
+            (!own, own && st.lead.lock_on_start)
+        };
+        if start_locked {
+            node.lead_lock_console();
+        }
         Self {
             node,
             page: Page::Home,
@@ -191,12 +204,16 @@ impl LeadApp {
             modifiers: egui::Modifiers::NONE,
             member_dialog: None,
             draft: SettingsDraft { reasons, repo, personal, ..Default::default() },
-            locked: false,
+            locked: start_locked,
+            need_password,
+            own_pw: Default::default(),
+            own_pw_error: String::new(),
+            code_pw: String::new(),
+            shown_code: None,
             unlock_input: String::new(),
             nav_open: true,
             nav_peek: false,
             opened_maximized: false,
-            key_view: Default::default(),
             unlock_error: false,
             last_tick: std::time::SystemTime::now(),
             was_win_locked: false,
@@ -269,7 +286,8 @@ impl LeadApp {
             let st = self.node.state.read();
             (st.lead.console_password.clone(), st.directory.policy.admin_password.clone())
         };
-        let ok = if console.is_empty() { secure::check_password(&admin, &self.unlock_input) } else { secure::check_password(&console, &self.unlock_input) };
+        // The lead's own password, or the team admin password as the administrator's reserve.
+        let ok = [&console, &admin].iter().any(|h| !h.is_empty() && secure::check_password(h, &self.unlock_input)) || (console.is_empty() && admin.is_empty());
         if ok {
             self.locked = false;
             self.unlock_input.clear();
@@ -294,11 +312,78 @@ impl LeadApp {
                     ui.colored_label(theme::danger(), tr("Невірний пароль"));
                 }
                 ui.add_space(8.0);
-                let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
                 if ui.button(tr("Розблокувати")).clicked() || enter {
                     self.try_unlock();
                 }
             });
+        });
+    }
+
+    /// Every lead has a console password of their own. The team admin password stays a reserve.
+    fn own_password_screen(&mut self, ctx: &egui::Context) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(ui.available_height() * 0.25);
+                ui.label(RichText::new(icon::LOCK).size(40.0));
+                ui.add_space(8.0);
+                ui.heading(tr("Задай свій пароль консолі"));
+                ui.label(tr("Ним відкривається ця консоль. Адмінський пароль команди теж підходить як запасний."));
+                ui.add_space(12.0);
+                let first = ui.add(egui::TextEdit::singleline(&mut self.own_pw.0).password(true).desired_width(240.0).hint_text(tr("Пароль")));
+                let second = ui.add(egui::TextEdit::singleline(&mut self.own_pw.1).password(true).desired_width(240.0).hint_text(tr("Ще раз")));
+                if !self.own_pw_error.is_empty() {
+                    ui.colored_label(theme::danger(), &self.own_pw_error);
+                }
+                ui.add_space(8.0);
+                let tab = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab));
+                let mut enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                // Tab, or Enter in the first field, goes on to the second one.
+                if (first.has_focus() || first.lost_focus()) && (tab || (enter && self.own_pw.1.is_empty())) {
+                    second.request_focus();
+                    enter = false;
+                } else if tab {
+                    first.request_focus();
+                } else if !first.has_focus() && !second.has_focus() && !enter {
+                    first.request_focus();
+                }
+                if ui.button(tr("Зберегти")).clicked() || enter {
+                    if self.own_pw.0.chars().count() < 4 {
+                        self.own_pw_error = tr("Пароль має бути не коротшим за 4 символи.").into();
+                    } else if self.own_pw.0 != self.own_pw.1 {
+                        self.own_pw_error = tr("Паролі не збігаються.").into();
+                    } else {
+                        let h = secure::hash_password(&self.own_pw.0);
+                        self.save_lead(|l| l.console_password = h);
+                        self.own_pw = Default::default();
+                        self.need_password = false;
+                    }
+                }
+            });
+        });
+    }
+
+    /// The version a PC runs, in orange while it waits for the newer one.
+    fn version_label(&self, ui: &mut egui::Ui, id: &str) {
+        let Some(v) = self.node.peer(id).map(|p| p.app_version.clone()) else { return };
+        if crate::update::is_newer(crate::util::APP_VERSION, &v) {
+            ui.colored_label(Color32::from_rgb(202, 130, 16), format!("v{v}")).on_hover_text(tr("Стара версія, оновиться автоматично"));
+        } else {
+            ui.weak(format!("v{v}"));
+        }
+    }
+
+    /// A session in a window of its own, while the main window shows the list.
+    fn session_window(&mut self, ctx: &egui::Context) {
+        let Some(id) = self.active.clone() else { return };
+        let title = format!("{} - TL Supporter", self.node.member_name(&id));
+        let builder = egui::ViewportBuilder::default().with_title(title).with_inner_size([1280.0, 800.0]).with_min_inner_size([640.0, 400.0]);
+        ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("tls-session"), builder, |vctx, _| {
+            if vctx.input(|i| i.viewport().close_requested()) {
+                self.close_tab(&id);
+                return;
+            }
+            self.session(vctx);
         });
     }
 
@@ -401,6 +486,12 @@ impl LeadApp {
                     self.close_tab(&id);
                 }
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                    let version = if expanded { format!("TL Supporter {}", crate::util::APP_VERSION) } else { format!("v{}", crate::util::APP_VERSION) };
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.add_space(14.0);
+                        ui.label(RichText::new(version).size(11.0).weak());
+                    });
                     let lock_hint = if self.has_lock_password() { tr("Заблокувати") } else { tr("Спочатку задай пароль") };
                     if theme::nav_item(ui, icon::LOCK, lock_hint, false, expanded).clicked() {
                         self.lock_now();
@@ -541,23 +632,13 @@ impl LeadApp {
             ui.horizontal(|ui| {
                 ui.heading(tr("Працівники"));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let key = self.node.identity.id.clone();
-                    self.key_view.show_reversed(ui, &key);
+                    ui.weak(format!("{} {}", tr("Версія"), crate::util::APP_VERSION));
                 });
             });
             ui.add_space(8.0);
             theme::card(ui, "", |ui| self.add_by_code(ui));
             ui.horizontal(|ui| {
                 ui.add(egui::TextEdit::singleline(&mut self.search).desired_width(260.0).hint_text(tr("Пошук за іменем")));
-                ui.add_space(12.0);
-                ui.add(egui::TextEdit::singleline(&mut self.draft.new_group).desired_width(180.0).hint_text(tr("Назва групи")));
-                if ui.button(tr("Додати групу")).clicked() && !self.draft.new_group.trim().is_empty() {
-                    let name = std::mem::take(&mut self.draft.new_group).trim().to_string();
-                    self.node.update_directory(|d, me| {
-                        let id = secure::b64(&secure::random_bytes::<6>());
-                        d.groups.insert(id.clone(), Group { id, name, deleted: false, rev: Rev::new(me) });
-                    });
-                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if theme::tool_button(ui, icon::GRID, grid_view, tr("Мініатюри")).clicked() {
                         self.save_lead(|l| l.grid_view = true);
@@ -565,6 +646,19 @@ impl LeadApp {
                     if theme::tool_button(ui, icon::LIST, !grid_view, tr("Список")).clicked() {
                         self.save_lead(|l| l.grid_view = false);
                     }
+                    ui.add_space(8.0);
+                    // Making a group is its own action, apart from searching.
+                    ui.menu_button(tr("+ Нова група"), |ui| {
+                        theme::field(ui, &mut self.draft.new_group, tr("Назва групи"), false, 200.0);
+                        if ui.button(tr("Створити")).clicked() && !self.draft.new_group.trim().is_empty() {
+                            let name = std::mem::take(&mut self.draft.new_group).trim().to_string();
+                            self.node.update_directory(|d, me| {
+                                let id = secure::b64(&secure::random_bytes::<6>());
+                                d.groups.insert(id.clone(), Group { id, name, deleted: false, help_hidden: false, rev: Rev::new(me) });
+                            });
+                            ui.close_menu();
+                        }
+                    });
                 });
             });
             ui.add_space(8.0);
@@ -595,8 +689,50 @@ impl LeadApp {
                     }
                     ui.add_space(8.0);
                 }
+                self.leads_section(ui);
             });
         });
+    }
+
+    /// Lead PCs without a group cannot be reached by the others. The main PC still sees them.
+    fn leads_section(&mut self, ui: &mut egui::Ui) {
+        if !self.i_am_admin() {
+            return;
+        }
+        let leads: Vec<(String, String)> = {
+            let st = self.node.state.read();
+            let me = &self.node.identity.id;
+            st.directory
+                .members
+                .values()
+                .filter(|m| &m.id != me && m.role == Role::Lead && m.state == MemberState::Approved && m.group.is_empty())
+                .map(|m| (m.id.clone(), m.name.clone()))
+                .collect()
+        };
+        if leads.is_empty() {
+            return;
+        }
+        ui.add_space(8.0);
+        ui.label(RichText::new(tr("Керівники без групи")).strong().size(15.0));
+        ui.weak(tr("Щоб бачити екран і керувати ПК керівника, додай його в групу."));
+        ui.add_space(4.0);
+        for (id, name) in leads {
+            let (dot, status) = self.member_status(&id, false);
+            theme::row_card(ui, |ui| {
+                theme::avatar(ui, &name, color_for(&id), dot, 36.0);
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 1.0;
+                    ui.add(egui::Label::new(RichText::new(&name).strong()).truncate());
+                    ui.weak(status);
+                });
+                self.version_label(ui, &id);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(tr("Додати в групу")).clicked() {
+                        self.member_dialog = Some(self.dialog_for(&id));
+                    }
+                });
+            });
+        }
     }
 
     fn group_header(&mut self, ui: &mut egui::Ui, gid: &str, name: &str, members: &[String]) {
@@ -663,6 +799,17 @@ impl LeadApp {
                 } else {
                     if theme::tool_button(ui, icon::CLOSE, false, tr("Видалити групу")).clicked() {
                         self.confirm_delete_group = Some(gid.to_string());
+                    }
+                    let hidden = self.node.state.read().directory.groups.get(gid).is_some_and(|g| g.help_hidden);
+                    let tip = if hidden { tr("Кнопку допомоги в цій групі вимкнено") } else { tr("Кнопка допомоги в цій групі увімкнена") };
+                    if theme::tool_button(ui, icon::HELP, !hidden, tip).clicked() {
+                        let id = gid.to_string();
+                        self.node.update_directory(|d, me| {
+                            if let Some(g) = d.groups.get_mut(&id) {
+                                g.help_hidden = !hidden;
+                                g.rev = Rev::new(me);
+                            }
+                        });
                     }
                     if theme::tool_button(ui, icon::PEN, false, tr("Перейменувати групу")).clicked() {
                         self.renaming = Some((gid.to_string(), name.to_string()));
@@ -948,6 +1095,7 @@ impl LeadApp {
                 ui.weak(status);
             });
             self.member_flags(ui, id);
+            self.version_label(ui, id);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if theme::tool_button(ui, icon::MORE, false, tr("Ім'я, група, запити")).clicked() {
                     self.member_dialog = Some(self.dialog_for(id));
@@ -1183,10 +1331,15 @@ impl LeadApp {
                 theme::flat_menu(ui, icon::MORE, tr("Гучність мого мікрофона"), |ui| {
                     let mut gain = self.node.state.read().lead.mic_gain * 100.0;
                     ui.label(tr("Гучність мого мікрофона"));
-                    if ui.add(egui::Slider::new(&mut gain, 20.0..=200.0).integer().suffix("%")).changed() {
-                        let value = gain / 100.0;
+                    let r = ui.add(egui::Slider::new(&mut gain, 20.0..=200.0).integer().suffix("%"));
+                    let value = gain / 100.0;
+                    if r.changed() {
                         crate::audio::set_mic_gain(value);
-                        self.save_lead(|l| l.mic_gain = value);
+                        self.node.state.write().lead.mic_gain = value;
+                    }
+                    // Written to disk once the slider is let go, not on every step.
+                    if r.drag_stopped() || (r.changed() && !r.dragged()) {
+                        self.node.save();
                     }
                     ui.add_space(4.0);
                     ui.add_enabled(false, egui::Button::new(tr("І клієнт"))).on_disabled_hover_text(tr("Потрібен драйвер віртуального мікрофона. Буде додано пізніше."));
@@ -1204,19 +1357,26 @@ impl LeadApp {
                 if theme::tool_button(ui, icon::HEADPHONE, mode.listen, tr("Слухати")).clicked() {
                     next.listen = !mode.listen;
                 }
+                if theme::tool_button(ui, icon::MONITOR, mode.screen != ScreenLevel::Off, tr("Зображення")).clicked() {
+                    next.screen = if mode.screen == ScreenLevel::Off { ScreenLevel::Full } else { ScreenLevel::Off };
+                }
                 let live = mode.listen && now_ms() - last_audio < 1500;
                 theme::flat_menu(ui, icon::MORE, tr("Звук системи"), |ui| {
                     let s = self.node.state.read().lead.clone();
                     let (mut agent, mut system) = (s.mix_agent * 100.0, s.mix_system * 100.0);
                     ui.label(tr("Мікрофон працівника"));
-                    let a = ui.add(egui::Slider::new(&mut agent, 0.0..=150.0).integer().suffix("%")).changed();
+                    let a = ui.add(egui::Slider::new(&mut agent, 0.0..=150.0).integer().suffix("%"));
                     ui.label(tr("Звук системи"));
-                    let b = ui.add(egui::Slider::new(&mut system, 0.0..=150.0).integer().suffix("%")).changed();
-                    if a || b {
-                        self.save_lead(|l| {
-                            l.mix_agent = agent / 100.0;
-                            l.mix_system = system / 100.0;
-                        });
+                    let b = ui.add(egui::Slider::new(&mut system, 0.0..=150.0).integer().suffix("%"));
+                    if a.changed() || b.changed() {
+                        crate::lead_core::set_mix(agent / 100.0, system / 100.0);
+                        let mut st = self.node.state.write();
+                        st.lead.mix_agent = agent / 100.0;
+                        st.lead.mix_system = system / 100.0;
+                    }
+                    let released = |r: &egui::Response| r.drag_stopped() || (r.changed() && !r.dragged());
+                    if released(&a) || released(&b) {
+                        self.node.save();
                     }
                 });
                 if live {
@@ -1245,9 +1405,9 @@ impl LeadApp {
                 if next != mode {
                     self.node.lead_set_mode(&id, next);
                 }
-                let others = activity.iter().filter(|a| a.id != me && (a.watching || a.listening)).count();
-                if others > 0 {
-                    ui.weak(format!("+{others}")).on_hover_text(tr("Ще підключено"));
+                let others: Vec<String> = activity.iter().filter(|a| a.id != me && (a.watching || a.listening)).map(|a| a.name.clone()).collect();
+                if !others.is_empty() {
+                    ui.colored_label(Color32::from_rgb(96, 205, 255), format!("{}: {}", tr("Також тут"), others.join(", ")));
                 }
                 if !online {
                     ui.colored_label(theme::danger(), tr("Не в мережі"));
@@ -1536,9 +1696,23 @@ impl LeadApp {
             ui.separator();
             let needle = self.journal_filter.to_lowercase();
             let log = self.node.audit.lock().clone();
+            // A lead without the administration right sees what concerns their own groups.
+            let (admin, my_name, reach_ids, reach_names) = {
+                let st = self.node.state.read();
+                let me = &self.node.identity.id;
+                let admin = st.directory.member(me).is_some_and(|m| m.rights.admin);
+                let reach: Vec<&model::Member> = st.directory.members.values().filter(|m| st.directory.lead_can_reach(me, &m.id)).collect();
+                let ids: std::collections::HashSet<String> = reach.iter().map(|m| m.id.clone()).collect();
+                let names: std::collections::HashSet<String> = reach.iter().map(|m| m.name.clone()).collect();
+                (admin, self.node.my_name(), ids, names)
+            };
+            let mine = |e: &model::LogEntry| {
+                admin || e.lead == my_name || if e.target_id.is_empty() { reach_names.contains(&e.target) } else { reach_ids.contains(&e.target_id) }
+            };
             let rows: Vec<&model::LogEntry> = log
                 .iter()
                 .rev()
+                .filter(|e| mine(e))
                 .filter(|e| needle.is_empty() || format!("{} {} {}", e.lead, e.target, e.action).to_lowercase().contains(&needle))
                 .collect();
             egui::ScrollArea::vertical().auto_shrink([false; 2]).show_rows(ui, 20.0, rows.len(), |ui, range| {
@@ -1624,6 +1798,39 @@ impl LeadApp {
                 }
             });
         });
+        theme::card(ui, tr("Код підключення цього ПК"), |ui| {
+            match self.shown_code.clone().filter(|c| c.1.elapsed() < std::time::Duration::from_secs(600)) {
+                Some((code, _)) => {
+                    ui.label(RichText::new(&code).size(24.0).strong());
+                    ui.weak(tr("Код діє 10 хвилин. Керівник вводить його в «Додати ПК за кодом», щоб перенести цей ПК у групу."));
+                }
+                None => {
+                    ui.horizontal(|ui| {
+                        theme::field(ui, &mut self.code_pw, tr("Адмінський пароль"), true, 220.0);
+                        if ui.button(tr("Показати код")).clicked() {
+                            let admin = self.node.state.read().directory.policy.admin_password.clone();
+                            if !self.code_pw.is_empty() && secure::check_password(&admin, &self.code_pw) {
+                                let code = secure::generate_join_code();
+                                crate::node::announce_code(self.node.identity.clone(), code.clone(), self.node.my_name(), 10);
+                                self.shown_code = Some((code, std::time::Instant::now()));
+                            } else {
+                                self.draft.message = tr("Невірний адмінський пароль.").into();
+                            }
+                            self.code_pw.clear();
+                        }
+                    });
+                }
+            }
+        });
+        theme::card(ui, tr("Сеанси"), |ui| {
+            let mut detached = self.node.state.read().lead.session_window;
+            if theme::toggle(ui, &mut detached, tr("Відкривати сеанс в окремому вікні")).changed() {
+                self.save_lead(|l| l.session_window = detached);
+            }
+            if ui.button(tr("Відкрити журнал програми")).clicked() {
+                crate::util::open_log();
+            }
+        });
         theme::card(ui, tr("Вигляд"), |ui| {
             egui::Grid::new("look").num_columns(2).spacing([24.0, 10.0]).show(ui, |ui| {
                 ui.label(tr("Мова"));
@@ -1650,6 +1857,7 @@ impl LeadApp {
             });
             theme::toggle(ui, &mut s.lock_with_windows, tr("Разом із Windows"));
             theme::toggle(ui, &mut s.lock_on_sleep, tr("Після сну"));
+            theme::toggle(ui, &mut s.lock_on_start, tr("Під час запуску програми"));
             if !self.has_lock_password() {
                 ui.colored_label(theme::danger(), tr("Пароль не задано, блокування не спрацює."));
             }
@@ -1845,6 +2053,7 @@ impl LeadApp {
                 ui.add_enabled(admin, egui::Slider::new(&mut p.stroke_fade_sec, 1..=120));
                 ui.end_row();
             });
+            theme::toggle(ui, &mut s.show_taps, tr("Показувати працівнику мої кліки"));
         });
         theme::card(ui, tr("У працівника"), |ui| {
             if !admin { ui.disable(); }
@@ -2037,6 +2246,11 @@ impl LeadApp {
             self.draft.update_busy = false;
         }
         ui.label(format!("{}: {}", tr("Поточна версія"), crate::util::APP_VERSION));
+        let mut auto = self.node.state.read().lead.auto_update;
+        if ui.add_enabled_ui(admin, |ui| theme::toggle(ui, &mut auto, tr("Перевіряти оновлення автоматично"))).inner.changed() {
+            self.save_lead(|l| l.auto_update = auto);
+        }
+        ui.weak(tr("Головний ПК сам кілька разів на день перевіряє нову версію і роздає її. ПК, що був вимкнений, отримає її, щойно з'явиться в мережі."));
         ui.horizontal(|ui| {
             ui.label("GitHub");
             ui.add(egui::TextEdit::singleline(&mut self.draft.repo).desired_width(240.0).hint_text(crate::update::DEFAULT_REPO));
@@ -2065,6 +2279,9 @@ impl LeadApp {
         let opts = self.group_options();
         egui::Window::new(tr("Працівник")).collapsible(false).resizable(false).open(&mut open).show(ctx, |ui| {
             ui.label(format!("{}: {}", tr("Ключ ПК"), dlg.id));
+            if let Some(v) = self.node.peer(&dlg.id).map(|p| p.app_version.clone()) {
+                ui.label(format!("{}: {v}", tr("Версія")));
+            }
             let main_pc = self.node.state.read().directory.owner_id == dlg.id;
             ui.horizontal(|ui| {
                 ui.label(tr("Ім'я:"));
@@ -2174,13 +2391,21 @@ impl eframe::App for LeadApp {
             self.lock_screen(ctx);
             return;
         }
+        if self.need_password {
+            self.own_password_screen(ctx);
+            return;
+        }
         self.nav_rail(ctx);
         self.help_banner(ctx);
         if self.page != Page::Home {
             self.node.lead_set_thumbs(false);
         }
+        let detached = self.node.state.read().lead.session_window && self.active.is_some();
+        if detached && self.page == Page::Session {
+            self.page = Page::Home;
+        }
         // Only the session being looked at receives a picture.
-        let visible = if self.page == Page::Session { self.active.clone() } else { None };
+        let visible = if detached || self.page == Page::Session { self.active.clone() } else { None };
         for tab in &self.tabs {
             self.node.lead_set_parked(tab, Some(tab) != visible.as_ref());
         }
@@ -2189,6 +2414,9 @@ impl eframe::App for LeadApp {
             Page::Session => self.session(ctx),
             Page::Journal => self.journal(ctx),
             Page::Settings => self.settings(ctx),
+        }
+        if detached {
+            self.session_window(ctx);
         }
         self.member_dialog(ctx);
         let _ = color_for;

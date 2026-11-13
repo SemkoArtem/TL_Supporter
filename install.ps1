@@ -50,6 +50,12 @@ try {
     $ProgressPreference = "SilentlyContinue"
     Invoke-WebRequest -Uri $url -OutFile $target -UseBasicParsing -Headers @{ "User-Agent" = "TLSupporter-installer" }
     if ((Get-Item $target).Length -lt 1MB) { throw "the downloaded file is too small, check the internet connection" }
+    # The signature lets this PC pass the version on to PCs that were off during an update.
+    try {
+        Invoke-WebRequest -Uri "$url.sig" -OutFile "$target.sig" -UseBasicParsing -Headers @{ "User-Agent" = "TLSupporter-installer" }
+    } catch {
+        Write-Host "The signature was not downloaded, the program still works." -ForegroundColor Yellow
+    }
     Unblock-File $target
 
     # Installs the Windows service. It starts the program now and at every Windows start.

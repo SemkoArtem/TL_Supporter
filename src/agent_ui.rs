@@ -263,6 +263,27 @@ enum Action {
     HideDrawings,
 }
 
+/// The employee's own choice to keep the help button out of sight.
+static HELP_PREF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+const HELP_CFG: &str = "help_button.cfg";
+
+pub fn load_help_pref() {
+    let off = std::fs::read_to_string(crate::util::data_dir().join(HELP_CFG)).is_ok_and(|t| t.trim() == "0");
+    HELP_PREF.store(!off, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn help_pref() -> bool {
+    std::fs::read_to_string(crate::util::data_dir().join(HELP_CFG)).map_or(true, |t| t.trim() != "0")
+}
+
+pub fn save_help_pref(on: bool) {
+    let _ = std::fs::write(crate::util::data_dir().join(HELP_CFG), if on { "1" } else { "0" });
+    HELP_PREF.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// When the button is kept out of sight, a new hint shows it for this long.
+const REVEAL: Duration = Duration::from_secs(20);
+
 const FADE: Duration = Duration::from_millis(1500);
 const TAP_LIFE: Duration = Duration::from_millis(700);
 const POINTER_LIFE: Duration = Duration::from_secs(2);
@@ -535,6 +556,7 @@ struct Ui {
     panel_hwnd: HWND,
     panel_dib: Option<Dib>,
     panel_visible: bool,
+    reveal_until: Option<Instant>,
     panel_dirty: bool,
     actions: Vec<(Rect, Action)>,
     overlays: Vec<Overlay>,
@@ -636,6 +658,7 @@ impl Ui {
                 if self.hints.len() > 300 {
                     self.hints.remove(0);
                 }
+                self.reveal_until = Some(Instant::now() + REVEAL);
                 self.panel_dirty = true;
             }
             UiCmd::Consent { lead, name } => {
@@ -839,7 +862,16 @@ impl Ui {
         let Some(font) = self.font.take() else { return };
         let now = Instant::now();
         let hold = self.hint_hold();
-        let show_button = !self.is_lead_pc && (self.policy.show_help_button || !self.hints.is_empty());
+        // The team, the group and the employee can each keep the button away. It then appears
+        // only for a moment after a hint and stays while something is unread or waiting.
+        let group_on = {
+            let st = self.node.state.read();
+            st.directory.member(&self.node.identity.id).and_then(|m| st.directory.groups.get(&m.group)).map_or(true, |g| !g.help_hidden)
+        };
+        let help_on = self.policy.show_help_button && group_on;
+        let wanted = help_on && HELP_PREF.load(std::sync::atomic::Ordering::Relaxed);
+        let revealed = self.reveal_until.is_some_and(|t| now < t) || self.hints.iter().any(|h| h.state == 0) || self.help_waiting || self.menu_open || self.menu_progress > 0.0;
+        let show_button = !self.is_lead_pc && (wanted || revealed);
         let rects = capture::monitor_rects();
         let primary = rects.iter().find(|r| r.0 == 0 && r.1 == 0).or(rects.first()).copied().unwrap_or((0, 0, 1920, 1080));
         let (ax, ay) = self.anchor.unwrap_or((primary.0 + primary.2 - BTN - 8, primary.1 + primary.3 * 3 / 4));
@@ -877,7 +909,7 @@ impl Ui {
             end.saturating_sub(HISTORY_ROWS)..end
         };
         let row_h = |lines: usize, state: u8| 30.0 + lines as f32 * 19.0 + if state <= 1 { 26.0 } else { 0.0 } + 4.0;
-        let can_ask = self.policy.show_help_button && !self.is_lead_pc;
+        let can_ask = help_on && !self.is_lead_pc;
         let reasons: Vec<(String, String)> = if can_ask && !self.help_waiting {
             let mut list = vec![(tr("Допоможіть").to_string(), String::new())];
             list.extend(self.policy.help_reasons.iter().map(|r| (tr(r).to_string(), r.clone())));
@@ -1287,6 +1319,10 @@ impl Ui {
             self.last_refresh = now;
             changed = true;
         }
+        if self.reveal_until.is_some_and(|t| now >= t) {
+            self.reveal_until = None;
+            changed = true;
+        }
         if changed {
             self.panel_dirty = true;
         }
@@ -1369,6 +1405,7 @@ impl Ui {
             || self.menu_open
             || self.menu_progress > 0.0
             || self.hints.iter().any(|h| h.toast_from.is_some())
+            || self.reveal_until.is_some()
     }
 
     fn update_timer(&mut self) {
@@ -1545,7 +1582,7 @@ pub fn run(node: Arc<Node>, rx: Receiver<UiCmd>, handle: UiHandle, is_lead_pc: b
             hIcon: tray_icon(color),
             ..Default::default()
         };
-        let tip = wide("TL Supporter");
+        let tip = wide(&format!("TL Supporter {}", crate::util::APP_VERSION));
         data.szTip[..tip.len()].copy_from_slice(&tip);
         let _ = Shell_NotifyIconW(NIM_ADD, &data);
         let _ = RegisterHotKey(None, HOTKEY_HIDE, MOD_CONTROL | MOD_ALT, 'H' as u32);
@@ -1562,6 +1599,7 @@ pub fn run(node: Arc<Node>, rx: Receiver<UiCmd>, handle: UiHandle, is_lead_pc: b
             panel_hwnd,
             panel_dib: None,
             panel_visible: false,
+            reveal_until: None,
             panel_dirty: true,
             actions: Vec::new(),
             overlays: Vec::new(),

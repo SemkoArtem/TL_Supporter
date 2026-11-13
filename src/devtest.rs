@@ -100,6 +100,41 @@ pub fn release_worker(secs: u64) -> Result<()> {
     Ok(())
 }
 
+/// The employee's sound keeps playing after its capture starts again, as when a lead stops
+/// listening and listens again.
+pub fn audio_restart(identity: Identity) -> Result<()> {
+    let state = model::load_state();
+    let me = identity.id.clone();
+    let (ui, rx) = UiHandle::new();
+    std::thread::spawn(move || while rx.recv().is_ok() {});
+    let node = crate::node::start(identity, state, ui)?;
+    let online = || node.state.read().directory.members.values().find(|m| m.id != me && m.role == Role::Agent && node.peer(&m.id).is_some()).map(|m| m.id.clone());
+    wait_for(40, || online().is_some());
+    let Some(target) = online() else { bail!("no other PC came online") };
+    let counts = || node.lead.lock().player.as_ref().map(|p| p.counts()).unwrap_or((0, 0));
+    // The lead speaks too, so the employee's PC receives a voice that also starts again.
+    node.lead_set_voice_target(Some(target.clone()));
+    crate::lead_core::MIC_LATCHED.store(true, std::sync::atomic::Ordering::Relaxed);
+    let listen = Mode { listen: true, ..Default::default() };
+    node.lead_set_mode(&target, listen);
+    std::thread::sleep(Duration::from_secs(3));
+    let first = counts();
+    println!("FIRST played={} refused={}", first.0, first.1);
+    for round in 1..=3 {
+        node.lead_set_mode(&target, Mode::default());
+        node.lead_set_voice_target(None);
+        std::thread::sleep(Duration::from_millis(1500));
+        node.lead_set_mode(&target, listen);
+        node.lead_set_voice_target(Some(target.clone()));
+        crate::lead_core::MIC_LATCHED.store(true, std::sync::atomic::Ordering::Relaxed);
+        let before = counts();
+        std::thread::sleep(Duration::from_secs(3));
+        let after = counts();
+        println!("AFTER_RESTART_{round} played={} refused={}", after.0 - before.0, after.1 - before.1);
+    }
+    std::process::exit(0);
+}
+
 fn wait_for(limit_secs: u64, mut check: impl FnMut() -> bool) -> Option<Duration> {
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(limit_secs) {
@@ -223,6 +258,76 @@ pub fn code_add(identity: Identity, code: &str) -> Result<()> {
     let st = node.state.read();
     let m = st.directory.member(&view.found_id).cloned().unwrap_or_default();
     println!("MEMBER role={:?} state={:?} group_set={}", m.role, m.state, !m.group.is_empty());
+    std::process::exit(0);
+}
+
+/// A PC already in the team shows its code, as from the settings window.
+pub fn announce(identity: &Identity, code: &str) -> Result<()> {
+    let name = model::load_state().display_name;
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(60) {
+        if crate::node::try_join(identity, code, &name, 1).is_ok() {
+            println!("ANNOUNCE_ACCEPTED");
+            return Ok(());
+        }
+    }
+    bail!("no lead answered")
+}
+
+/// A lead enters the code of a PC that is already in the team and picks another group.
+pub fn code_move(identity: Identity, code: &str, as_lead: bool) -> Result<()> {
+    let state = model::load_state();
+    let (ui, rx) = UiHandle::new();
+    std::thread::spawn(move || while rx.recv().is_ok() {});
+    let my_id = identity.id.clone();
+    let node = crate::node::start(identity, state, ui)?;
+    let target = node.state.read().directory.members.values().find(|m| m.id != my_id).map(|m| m.id.clone()).unwrap_or_default();
+    let group = secure::b64(&secure::random_bytes::<6>());
+    let (gid, tid) = (group.clone(), target.clone());
+    node.update_directory(|d, me| {
+        d.groups.insert(gid.clone(), model::Group { id: gid.clone(), name: "Друга".into(), deleted: false, help_hidden: false, rev: Rev::new(me) });
+        if as_lead {
+            if let Some(m) = d.members.get_mut(&tid) {
+                m.role = Role::Lead;
+                m.rev = Rev::new(me);
+            }
+        }
+    });
+    let show = |tag: &str| {
+        let st = node.state.read();
+        let m = st.directory.member(&target).cloned().unwrap_or_default();
+        println!("{tag} role={:?} state={:?} in_new_group={}", m.role, m.state, m.group == group);
+    };
+    show("BEFORE");
+    node.lead_check_code(code);
+    let found = wait_for(30, || node.lead_check_view().is_some_and(|c| !c.found_id.is_empty()));
+    println!("FOUND after={found:?} same_pc={}", node.lead_check_view().is_some_and(|c| c.found_id == target));
+    node.lead_add_checked(group.clone());
+    let added = wait_for(15, || node.lead_check_view().is_some_and(|c| c.added));
+    println!("ADDED after={added:?}");
+    std::thread::sleep(Duration::from_secs(2));
+    show("AFTER");
+    let journal = node.audit.lock().iter().any(|e| e.action == "Переміщено в групу");
+    println!("JOURNAL_MOVED {journal}");
+    std::process::exit(0);
+}
+
+/// A lead stays online for some seconds, then reports every member and the journal.
+pub fn watch(identity: Identity, seconds: u64) -> Result<()> {
+    // As the program does when it starts.
+    crate::update::discard_stale_update();
+    let state = model::load_state();
+    let (ui, rx) = UiHandle::new();
+    std::thread::spawn(move || while rx.recv().is_ok() {});
+    let node = crate::node::start(identity, state, ui)?;
+    std::thread::sleep(Duration::from_secs(seconds));
+    let st = node.state.read();
+    for m in st.directory.members.values().filter(|m| m.id != node.identity.id) {
+        println!("MEMBER role={:?} state={:?} version={}", m.role, m.state, node.peer(&m.id).map(|p| p.app_version.clone()).unwrap_or_default());
+    }
+    for e in node.audit.lock().iter() {
+        println!("JOURNAL {} | {} | target_id_set={}", e.action, e.target, !e.target_id.is_empty());
+    }
     std::process::exit(0);
 }
 

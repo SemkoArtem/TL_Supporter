@@ -204,6 +204,27 @@ pub fn decode_disc(b: &[u8]) -> Option<Disc> {
     rmp_serde::from_slice(b).ok()
 }
 
+/// Windows turns a "port unreachable" reply to an earlier packet into an error on the next
+/// receive. A PC that was off could then stall the wait for an answer, so it is switched off.
+pub fn ignore_unreachable(socket: &impl std::os::windows::io::AsRawSocket) {
+    use windows::Win32::Networking::WinSock::{WSAIoctl, SIO_UDP_CONNRESET, SOCKET};
+    let off: u32 = 0;
+    let mut returned = 0u32;
+    unsafe {
+        let _ = WSAIoctl(
+            SOCKET(socket.as_raw_socket() as usize),
+            SIO_UDP_CONNRESET,
+            Some(&off as *const u32 as *const std::ffi::c_void),
+            std::mem::size_of::<u32>() as u32,
+            None,
+            0,
+            &mut returned,
+            None,
+            None,
+        );
+    }
+}
+
 /// Broadcast addresses of all active IPv4 interfaces, without loopback.
 pub fn broadcast_targets(port: u16) -> Vec<SocketAddr> {
     let mut out = Vec::new();

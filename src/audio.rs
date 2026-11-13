@@ -385,11 +385,9 @@ fn capture_once(kind: CaptureKind, stop: &AtomicBool, on_packet: &mut impl FnMut
                         heard = true;
                         crate::logi!("audio capture {kind:?}: sound detected");
                     }
-                    // Silence is not sent at all.
-                    if frame.iter().any(|s| s.unsigned_abs() > 30) {
-                        let n = encoder.encode(&frame, &mut output).map_err(|e| anyhow!("opus: {e}"))?;
-                        on_packet(&output[..n]);
-                    }
+                    // Quiet frames are sent too. Leaving them out cut off the soft start of words.
+                    let n = encoder.encode(&frame, &mut output).map_err(|e| anyhow!("opus: {e}"))?;
+                    on_packet(&output[..n]);
                 }
             }
             Ok(())
@@ -408,19 +406,38 @@ struct Source {
     gain: f32,
     started: bool,
     last_seq: Option<u16>,
+    last_at: Option<std::time::Instant>,
+    accepted: u64,
+    refused: u64,
 }
+
+/// A packet this far behind the last one, or one after this long a pause, starts a new stream:
+/// the sender began capturing again and numbers its packets from zero. Treating such packets as
+/// late used to silence a voice for minutes.
+const RESTART_BEHIND: u16 = 50;
+const RESTART_PAUSE: std::time::Duration = std::time::Duration::from_millis(300);
 
 const START_SAMPLES: usize = 1920; // 40 ms of jitter buffer before playback starts
 const MAX_SAMPLES: usize = 9600; // beyond 200 ms the queue is trimmed
 
 fn apply_packet(src: &mut Source, packet: &[u8], seq: u16) {
+    let now = std::time::Instant::now();
     if let Some(last) = src.last_seq {
         let delta = seq.wrapping_sub(last);
-        if delta == 0 || delta > 32768 {
-            return; // duplicate or late
+        let paused = src.last_at.is_some_and(|t| now.duration_since(t) > RESTART_PAUSE);
+        let behind = delta > 32768;
+        let restarted = paused || (behind && last.wrapping_sub(seq) > RESTART_BEHIND);
+        if !restarted && (delta == 0 || behind) {
+            src.refused += 1;
+            return; // duplicate or slightly late
+        }
+        if restarted {
+            if let Ok(d) = Decoder::new(SampleRate::Hz48000, Channels::Mono) {
+                src.decoder = d;
+            }
         }
         // Fill short gaps with Opus concealment.
-        for _ in 1..delta.min(4) {
+        for _ in 1..if restarted { 1 } else { delta.min(4) } {
             let mut pcm = vec![0i16; FRAME_SAMPLES];
             let lost: Option<audiopus::packet::Packet<'_>> = None;
             if let Ok(signals) = (&mut pcm[..]).try_into() {
@@ -431,6 +448,8 @@ fn apply_packet(src: &mut Source, packet: &[u8], seq: u16) {
         }
     }
     src.last_seq = Some(seq);
+    src.last_at = Some(now);
+    src.accepted += 1;
     let mut pcm = vec![0i16; FRAME_SAMPLES * 3];
     let (Ok(p), Ok(signals)) = (
         <&[u8] as TryInto<audiopus::packet::Packet<'_>>>::try_into(packet),
@@ -447,7 +466,28 @@ fn apply_packet(src: &mut Source, packet: &[u8], seq: u16) {
     }
 }
 
-fn mix_into(sources: &mut HashMap<u64, Source>, out: &mut [i16]) {
+/// The employee's microphone and computer sound are separate streams. Kept at the same delay,
+/// a voice present in both does not sound doubled.
+fn align_pairs(sources: &mut HashMap<u64, Source>) {
+    let source_of = |k: u64| ((k >> 24) & 0xFF) as u8;
+    let mics: Vec<u64> = sources.keys().copied().filter(|k| source_of(*k) == crate::proto::SRC_AGENT_MIC).collect();
+    for mic in mics {
+        let system = mic | (u64::from(crate::proto::SRC_AGENT_SYSTEM) << 24);
+        let len = |k: &u64| sources.get(k).filter(|s| s.started).map(|s| s.queue.len());
+        let (Some(a), Some(b)) = (len(&mic), len(&system)) else { continue };
+        let slack = FRAME_SAMPLES * 2;
+        if a > b + slack {
+            sources.get_mut(&mic).unwrap().queue.drain(..a - b);
+        } else if b > a + slack {
+            sources.get_mut(&system).unwrap().queue.drain(..b - a);
+        }
+    }
+}
+
+fn mix_into(sources: &mut HashMap<u64, Source>, out: &mut [i16], align: bool) {
+    if align {
+        align_pairs(sources);
+    }
     let frames = out.len() / 2;
     let mut mixed = vec![0f32; frames * 2];
     for src in sources.values_mut() {
@@ -479,13 +519,27 @@ pub struct Player {
 
 impl Player {
     pub fn new() -> Self {
+        Self::start(false)
+    }
+
+    /// On a lead's PC: the employee's microphone and computer sound are played in step.
+    pub fn for_lead() -> Self {
+        Self::start(true)
+    }
+
+    /// Packets played and packets refused as duplicate or late, over all streams.
+    pub fn counts(&self) -> (u64, u64) {
+        self.sources.lock().values().fold((0, 0), |a, s| (a.0 + s.accepted, a.1 + s.refused))
+    }
+
+    fn start(align: bool) -> Self {
         let sources = Arc::new(Mutex::new(HashMap::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let (s, t) = (sources.clone(), stop.clone());
         std::thread::spawn(move || {
             let _com = ComGuard::new();
             while !t.load(Ordering::Relaxed) {
-                if let Err(e) = render_once(&s, &t) {
+                if let Err(e) = render_once(&s, &t, align) {
                     crate::logi!("audio playback failed: {e}");
                     std::thread::sleep(std::time::Duration::from_millis(1500));
                 }
@@ -501,7 +555,7 @@ impl Player {
             let Ok(decoder) = Decoder::new(SampleRate::Hz48000, Channels::Mono) else { return };
             map.insert(
                 key,
-                Source { decoder, queue: VecDeque::new(), pan_left: 1.0, pan_right: 1.0, gain: 1.0, started: false, last_seq: None },
+                Source { decoder, queue: VecDeque::new(), pan_left: 1.0, pan_right: 1.0, gain: 1.0, started: false, last_seq: None, last_at: None, accepted: 0, refused: 0 },
             );
         }
         let src = map.get_mut(&key).unwrap();
@@ -522,7 +576,7 @@ impl Drop for Player {
     }
 }
 
-fn render_once(sources: &Mutex<HashMap<u64, Source>>, stop: &AtomicBool) -> Result<()> {
+fn render_once(sources: &Mutex<HashMap<u64, Source>>, stop: &AtomicBool, align: bool) -> Result<()> {
     let format = pcm_format(2);
     let client = device_client(eRender, AUDCLNT_STREAMFLAGS_EVENTCALLBACK, &format)?;
     unsafe {
@@ -541,7 +595,7 @@ fn render_once(sources: &Mutex<HashMap<u64, Source>>, stop: &AtomicBool) -> Resu
                 }
                 let data = render.GetBuffer(free)?;
                 let out = std::slice::from_raw_parts_mut(data as *mut i16, free as usize * 2);
-                mix_into(&mut sources.lock(), out);
+                mix_into(&mut sources.lock(), out, align);
                 render.ReleaseBuffer(free, 0)?;
             }
             Ok(())
@@ -565,7 +619,53 @@ mod tests {
             gain: 1.0,
             started: false,
             last_seq: None,
+            last_at: None,
+            accepted: 0,
+            refused: 0,
         }
+    }
+
+    fn packet(enc: &mut Encoder) -> Vec<u8> {
+        let tone: Vec<i16> = (0..FRAME_SAMPLES).map(|i| ((i as f32 * 0.05).sin() * 8000.0) as i16).collect();
+        let mut out = vec![0u8; 1500];
+        let n = enc.encode(&tone, &mut out).unwrap();
+        out.truncate(n);
+        out
+    }
+
+    #[test]
+    fn a_stream_that_starts_again_from_zero_is_played() {
+        let mut enc = Encoder::new(SampleRate::Hz48000, Channels::Mono, Application::Voip).unwrap();
+        let p = packet(&mut enc);
+        let mut s = source();
+        for seq in 4000..4005u16 {
+            apply_packet(&mut s, &p, seq);
+        }
+        let before = s.queue.len();
+        apply_packet(&mut s, &p, 4002);
+        assert_eq!(s.queue.len(), before, "a packet a little late is still dropped");
+        for seq in 0..5u16 {
+            apply_packet(&mut s, &p, seq);
+        }
+        assert_eq!(s.queue.len(), before + 5 * FRAME_SAMPLES, "the restarted stream is heard at once");
+        assert_eq!(s.refused, 1);
+    }
+
+    #[test]
+    fn microphone_and_computer_sound_stay_in_step() {
+        let mut map = HashMap::new();
+        let key = 7u64 << 32;
+        let mut mic = source();
+        mic.started = true;
+        mic.queue.extend(std::iter::repeat(1).take(FRAME_SAMPLES * 6));
+        let mut system = source();
+        system.started = true;
+        system.queue.extend(std::iter::repeat(2).take(FRAME_SAMPLES * 2));
+        map.insert(key | (u64::from(crate::proto::SRC_AGENT_MIC) << 24), mic);
+        map.insert(key | (u64::from(crate::proto::SRC_AGENT_SYSTEM) << 24), system);
+        align_pairs(&mut map);
+        let lens: Vec<usize> = map.values().map(|s| s.queue.len()).collect();
+        assert_eq!(lens[0], lens[1]);
     }
 
     #[test]
@@ -579,7 +679,7 @@ mod tests {
         map.insert(1u64, mic);
         map.insert(2u64, system);
         let mut out = vec![0i16; 8];
-        mix_into(&mut map, &mut out);
+        mix_into(&mut map, &mut out, false);
         assert_eq!(out[0], 1200, "both sources are heard at once");
         assert_eq!(out[1], 1200);
     }
@@ -605,10 +705,10 @@ mod tests {
         s.queue.extend(std::iter::repeat(1000).take(START_SAMPLES - 1));
         map.insert(1u64, s);
         let mut out = vec![0i16; 8];
-        mix_into(&mut map, &mut out);
+        mix_into(&mut map, &mut out, false);
         assert_eq!(out[0], 0, "not enough buffered yet");
         map.get_mut(&1).unwrap().queue.push_back(1000);
-        mix_into(&mut map, &mut out);
+        mix_into(&mut map, &mut out, false);
         assert_eq!(out[0], 1000);
         assert_eq!(out[1], 0, "right channel is muted");
     }

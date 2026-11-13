@@ -593,6 +593,7 @@ impl Node {
             }
             if n % 15 == 0 {
                 audio::apply_voice_cfg();
+                crate::agent_ui::load_help_pref();
                 crate::i18n::init();
                 let test_locked = crate::util::test_env("TLS_DATA_DIR").is_some() && crate::util::data_dir().join("fake.lock").exists();
                 let locked = sysutil::is_desktop_locked() || test_locked;

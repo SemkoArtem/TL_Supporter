@@ -155,6 +155,8 @@ pub enum Msg {
     Status { locked: bool },
     Rename { name: String },
     SendSas,
+    /// The sending PC was reset and leaves the team. It can only ever speak for itself.
+    LeftTeam,
 }
 
 const MAX_MSG: usize = 16 * 1024 * 1024;
