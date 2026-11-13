@@ -30,6 +30,10 @@ const TIMER_ANIM: usize = 1;
 const HOTKEY_HIDE: i32 = 1;
 const WDA_EXCLUDEFROMCAPTURE_VALUE: u32 = 0x11;
 
+/// Sent by Explorer when the taskbar appears, also after it restarts. Every tray icon has
+/// to be added again then.
+static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
+
 pub enum UiCmd {
     Draw { lead: String, name: String, color: [u8; 3], op: DrawOp },
     ClearLead(String),
@@ -308,6 +312,7 @@ enum Ev {
     PanelWheel(i32),
     TrayMenu,
     TrayOpen,
+    TrayLost,
 }
 
 fn push_event(e: Ev) {
@@ -357,6 +362,12 @@ unsafe extern "system" fn tray_proc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LR
         }
         // The shell delivers this without the message queue, so GetMessage would not return
         // and the click would wait for some later, unrelated message.
+        let _ = PostMessageW(h, WM_WAKE, WPARAM(0), LPARAM(0));
+        return LRESULT(0);
+    }
+    let created = TASKBAR_CREATED.load(Ordering::Relaxed);
+    if created != 0 && m == created {
+        push_event(Ev::TrayLost);
         let _ = PostMessageW(h, WM_WAKE, WPARAM(0), LPARAM(0));
         return LRESULT(0);
     }
@@ -552,6 +563,10 @@ struct Ui {
     tray_hwnd: HWND,
     tray_data: NOTIFYICONDATAW,
     tray_color: [u8; 3],
+    /// The icon is in the tray. Not yet when the program starts before the taskbar does.
+    tray_added: bool,
+    tray_retry: Instant,
+    tray_attempts: u32,
     quiet: bool,
     panel_hwnd: HWND,
     panel_dib: Option<Dib>,
@@ -610,8 +625,31 @@ impl Ui {
         self.tray_color = key;
         self.tray_data.hIcon = if self.quiet { icon_handle(moon_pixmap()) } else { tray_icon(color) };
         self.tray_data.uFlags = NIF_ICON;
-        unsafe {
-            let _ = Shell_NotifyIconW(NIM_MODIFY, &self.tray_data);
+        if self.tray_added && unsafe { !Shell_NotifyIconW(NIM_MODIFY, &self.tray_data).as_bool() } {
+            self.tray_added = false;
+        }
+    }
+
+    /// Adds the icon until the taskbar takes it. At sign-in the program can start first.
+    fn ensure_tray(&mut self) {
+        if self.tray_added || Instant::now() < self.tray_retry {
+            return;
+        }
+        self.tray_data.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+        // Adding fails when the icon is still there, then changing it is enough.
+        let ok = unsafe { Shell_NotifyIconW(NIM_ADD, &self.tray_data).as_bool() || Shell_NotifyIconW(NIM_MODIFY, &self.tray_data).as_bool() };
+        self.tray_attempts += 1;
+        if ok {
+            self.tray_added = true;
+            if self.tray_attempts > 1 {
+                crate::logi!("tray icon added after {} attempts", self.tray_attempts);
+            }
+            self.tray_attempts = 0;
+        } else {
+            if self.tray_attempts == 1 {
+                crate::logi!("tray icon not added yet, the taskbar may not be ready");
+            }
+            self.tray_retry = Instant::now() + Duration::from_secs(2);
         }
     }
 
@@ -626,9 +664,12 @@ impl Ui {
         copy(&mut self.tray_data.szInfo, text);
         self.tray_data.uFlags = NIF_INFO;
         self.tray_data.dwInfoFlags = NIIF_INFO;
-        unsafe {
-            let _ = Shell_NotifyIconW(NIM_MODIFY, &self.tray_data);
+        if self.tray_added && unsafe { !Shell_NotifyIconW(NIM_MODIFY, &self.tray_data).as_bool() } {
+            self.tray_added = false;
         }
+        // A balloon is shown once, not again each time the icon is added back.
+        self.tray_data.szInfo[0] = 0;
+        self.tray_data.szInfoTitle[0] = 0;
     }
 
     fn on_cmd(&mut self, c: UiCmd) {
@@ -1385,6 +1426,12 @@ impl Ui {
                     self.panel_dirty = true;
                 }
                 Ev::TrayMenu => self.tray_menu(),
+                Ev::TrayLost => {
+                    crate::logi!("taskbar started again, tray icon added back");
+                    self.tray_added = false;
+                    self.tray_retry = Instant::now();
+                    self.ensure_tray();
+                }
                 Ev::TrayOpen => {
                     if self.is_lead_pc {
                         restore_console_window();
@@ -1570,8 +1617,14 @@ pub fn run(node: Arc<Node>, rx: Receiver<UiCmd>, handle: UiHandle, is_lead_pc: b
         register_class(w!("TLSPanel"), Some(panel_proc));
         register_class(w!("TLSTray"), Some(tray_proc));
         let hinstance = GetModuleHandleW(None).unwrap_or_default();
+        TASKBAR_CREATED.store(RegisterWindowMessageW(w!("TaskbarCreated")), Ordering::Relaxed);
         let tray_hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), w!("TLSTray"), w!("TLS"), WS_OVERLAPPED, 0, 0, 0, 0, None, None, hinstance, None)
             .unwrap_or_default();
+        // Explorer runs with fewer rights when this program was started with more of them,
+        // and Windows would then drop its messages.
+        for m in [TASKBAR_CREATED.load(Ordering::Relaxed), WM_TRAY] {
+            let _ = ChangeWindowMessageFilterEx(tray_hwnd, m, MSGFLT_ALLOW, None);
+        }
         let color = [122, 117, 116];
         let mut data = NOTIFYICONDATAW {
             cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
@@ -1584,7 +1637,6 @@ pub fn run(node: Arc<Node>, rx: Receiver<UiCmd>, handle: UiHandle, is_lead_pc: b
         };
         let tip = wide(&format!("TL Supporter {}", crate::util::APP_VERSION));
         data.szTip[..tip.len()].copy_from_slice(&tip);
-        let _ = Shell_NotifyIconW(NIM_ADD, &data);
         let _ = RegisterHotKey(None, HOTKEY_HIDE, MOD_CONTROL | MOD_ALT, 'H' as u32);
         let panel_hwnd = create_layered(w!("TLSPanel"), 0, 0, PANEL_W, 40, false);
         let policy = node.state.read().directory.policy.clone();
@@ -1595,6 +1647,9 @@ pub fn run(node: Arc<Node>, rx: Receiver<UiCmd>, handle: UiHandle, is_lead_pc: b
             tray_hwnd,
             tray_data: data,
             tray_color: color,
+            tray_added: false,
+            tray_retry: Instant::now(),
+            tray_attempts: 0,
             quiet,
             panel_hwnd,
             panel_dib: None,
@@ -1635,6 +1690,7 @@ pub fn run(node: Arc<Node>, rx: Receiver<UiCmd>, handle: UiHandle, is_lead_pc: b
             leads_online: 0,
             timer_on: false,
         };
+        ui.ensure_tray();
         ui.update_tray();
         ui.render_panel();
         // A slow tick keeps the panel honest even when nothing else happens.
@@ -1653,6 +1709,7 @@ pub fn run(node: Arc<Node>, rx: Receiver<UiCmd>, handle: UiHandle, is_lead_pc: b
                 ui.on_cmd(c);
             }
             ui.drain_events();
+            ui.ensure_tray();
             ui.tick_hints();
             if ui.status.is_some() {
                 ui.panel_dirty = true;
