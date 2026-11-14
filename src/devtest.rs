@@ -111,7 +111,7 @@ pub fn audio_restart(identity: Identity) -> Result<()> {
     let online = || node.state.read().directory.members.values().find(|m| m.id != me && m.role == Role::Agent && node.peer(&m.id).is_some()).map(|m| m.id.clone());
     wait_for(40, || online().is_some());
     let Some(target) = online() else { bail!("no other PC came online") };
-    let counts = || node.lead.lock().player.as_ref().map(|p| p.counts()).unwrap_or((0, 0));
+    let counts = || node.lead.lock().player.lock().as_ref().map(|p| p.counts()).unwrap_or((0, 0));
     // The lead speaks too, so the employee's PC receives a voice that also starts again.
     node.lead_set_voice_target(Some(target.clone()));
     crate::lead_core::MIC_LATCHED.store(true, std::sync::atomic::Ordering::Relaxed);

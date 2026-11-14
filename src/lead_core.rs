@@ -116,7 +116,8 @@ pub struct LeadInner {
     pub active: Option<String>,
     pub thumbs_on: bool,
     pub console_locked: bool,
-    pub player: Option<Player>,
+    /// Behind its own lock, so that sound never waits for the picture or the console.
+    pub player: Arc<Mutex<Option<Player>>>,
     voice: Option<VoiceRun>,
     clip_seq: u32,
     clip_applied: Option<String>,
@@ -320,12 +321,13 @@ impl Node {
         if let Some(t) = l.targets.get_mut(&peer.id) {
             t.last_audio_ms = now_ms();
         }
-        if l.player.is_none() {
-            l.player = Some(Player::for_lead());
-        }
         let key = (secure::short_id(&peer.id) as u64) << 32 | (source as u64) << 24 | (sender as u64 & 0xFF_FFFF);
         if l.audio_logged & (1 << source.min(7)) == 0 { l.audio_logged |= 1 << source.min(7); crate::logi!("first audio packet source={source}"); }
-        l.player.as_ref().unwrap().push(key, 0.0, gain, opus, seq);
+        // Decoding happens under a lock of its own: the picture and the console use this one.
+        let player = l.player.clone();
+        drop(l);
+        let mut p = player.lock();
+        p.get_or_insert_with(Player::for_lead).push(key, 0.0, gain, opus, seq);
     }
 
     pub async fn lead_read_screen(self: Arc<Self>, peer: Arc<Peer>, mut s: quinn::RecvStream, kind: u8) -> Result<()> {
@@ -696,7 +698,8 @@ impl Node {
             let mut l = self.lead.lock();
             l.console_locked = true;
             let t: Vec<String> = l.targets.keys().cloned().collect();
-            (t, l.player.take())
+            let player = l.player.lock().take();
+            (t, player)
         };
         drop(player_drop);
         for id in targets {
