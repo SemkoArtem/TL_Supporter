@@ -33,6 +33,7 @@ The program is free of charge, a free license is planned for later.
 - A session can open in a separate window. The session toolbar has a separate button for the picture, and the click rings can be turned off.
 - On an employee's PC with several monitors the lead picks the monitor, or turns on "follow the cursor" and the session shows the monitor where the employee's cursor is.
 - The main PC confirms the role, access, rights and group of every PC with a key of its own, kept in the profile of its Windows user. A change that gives more, made by another lead, takes effect on the other PCs once the main PC is online and confirms it. An employee's access can be taken away by any lead of their group, a lead's rights only by an administrator, the main PC's own record only by the main PC. A lead limited to some groups moves PCs only between those groups.
+- The main PC's key for rights can be saved as a backup file under a password of its own (Settings, Team). With that file another lead PC becomes the main one if the main PC or its Windows account is lost. Until a backup is saved, the main PC shows a reminder.
 - Settings show the connection code of the PC behind the team admin password, on employee and lead PCs. A lead types it into "Додати ПК за кодом" to move a PC that is already in the team into another group, and the PC keeps its role.
 - The version is shown in the console, next to every PC, in the employee's tray tooltip and settings.
 - Adding a PC with a one-time code. An employee's PC can be made a lead with the team admin password. Only the main PC, the one that created the team, can give a lead the Administration right. When a lead revokes a PC's access, the program on that PC resets itself and shows a join code again. A factory reset releases the PC from its team. A PC that was reset with version 0.1.3 or older needs `TLSupporter.exe --clear-secure-pin`, run as administrator, before it joins another team.
@@ -61,7 +62,7 @@ Also tested with copies on one PC: version 0.3.0 passed to a PC that still runs 
 
 Version 0.3.1, tested with copies on one PC: confirmation of rights by the main PC, version 0.3.1 passed to a PC that runs 0.2.0.
 
-Version 0.3.2, tested with copies on one PC: leads that try to take the main PC or an administrator out of the team, or to pull a PC into their group, are refused; the separate key for rights; the screen copied only where it changed.
+Version 0.3.2, tested with copies on one PC: leads that try to take the main PC or an administrator out of the team, or to pull a PC into their group, are refused; the separate key for rights, its backup and another PC becoming the main one with it; the screen copied only where it changed.
 
 Not yet tested: two real computers, the service of version 0.3, real lock and sign-in screens and administrator windows,
 drawing and control over full-screen mstsc, the automatic check against GitHub on a real main PC, the service starting
@@ -213,6 +214,7 @@ The "client hears" mode needs a signed virtual microphone driver. Its button in 
 - Сеанс можна відкривати в окремому вікні. На панелі сеансу є окрема кнопка зображення, кільця кліків можна вимкнути.
 - На ПК працівника з кількома моніторами керівник вибирає монітор або вмикає «слідувати за курсором», і сеанс показує монітор, де зараз курсор працівника.
 - Головний ПК підтверджує роль, доступ, права й групу кожного ПК окремим ключем, що зберігається в профілі його користувача Windows. Зміна, що дає більше, зроблена іншим керівником, діє на інших ПК, щойно головний ПК буде в мережі й підтвердить її. Доступ працівника може забрати будь-який керівник його групи, права керівника лише адміністратор, а запис самого головного ПК лише головний ПК. Керівник, обмежений групами, переносить ПК лише між своїми групами.
+- Ключ головного ПК для прав можна зберегти як файл резервної копії під окремим паролем (Налаштування, Команда). З цим файлом інший ПК керівника стає головним, якщо головний ПК або його обліковий запис Windows пропаде. Поки копію не збережено, головний ПК показує нагадування.
 - У налаштуваннях за адмінським паролем команди видно код підключення ПК, і на ПК працівника, і на ПК керівника. Керівник вводить його в «Додати ПК за кодом», щоб перенести ПК, який уже в команді, в іншу групу. Роль ПК при цьому зберігається.
 - Версію програми видно в консолі, біля кожного ПК, у підказці значка в треї і в налаштуваннях працівника.
 - Додавання ПК за одноразовим кодом. ПК працівника можна зробити керівником за адмінським паролем команди. Право «Адміністрування» дає лише головний ПК, той, що створив команду. Коли керівник скасовує доступ ПК, програма на ньому сама скидається і знову показує код для приєднання. Скидання до заводських звільняє ПК від команди. Для ПК, скинутого у версії 0.1.3 або старішій, перед приєднанням до іншої команди запусти від адміністратора `TLSupporter.exe --clear-secure-pin`.
@@ -241,7 +243,7 @@ The "client hears" mode needs a signed virtual microphone driver. Its button in 
 
 Версія 0.3.1, перевірено копіями на одному ПК: підтвердження прав головним ПК, передача версії 0.3.1 на ПК з 0.2.0.
 
-Версія 0.3.2, перевірено копіями на одному ПК: відмова керівникам, які намагаються вивести з команди головний ПК чи адміністратора або перетягнути ПК у свою групу; окремий ключ для прав; копіювання екрана лише там, де він змінився.
+Версія 0.3.2, перевірено копіями на одному ПК: відмова керівникам, які намагаються вивести з команди головний ПК чи адміністратора або перетягнути ПК у свою групу; окремий ключ для прав, його резервна копія і перехід ролі головного ПК на інший ПК з нею; копіювання екрана лише там, де він змінився.
 
 Ще не перевірено: два реальні комп'ютери, служба версії 0.3, справжні екрани блокування, входу і вікна адміністратора,
 малюнки й керування поверх mstsc на весь екран, автоматична перевірка GitHub на реальному головному ПК, самостійний
