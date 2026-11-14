@@ -116,9 +116,15 @@ impl Member {
     }
 }
 
+/// What the main PC signs. The group is part of it, since a lead limited to some groups reaches
+/// a PC through its group.
 fn grant_message(team_id: &str, m: &Member) -> Vec<u8> {
     let bits: String = m.rights.bits().iter().map(|b| if *b { '1' } else { '0' }).collect();
-    format!("tlsupporter-grant:{team_id}:{}:{:?}:{:?}:{bits}:{}:{}", m.id, m.role, m.state, sorted(&m.lead_groups).join(","), m.grant_ts).into_bytes()
+    format!("tlsupporter-grant2:{team_id}:{}:{:?}:{:?}:{bits}:{}:{}:{}", m.id, m.role, m.state, sorted(&m.lead_groups).join(","), m.group, m.grant_ts).into_bytes()
+}
+
+fn grant_key_message(team_id: &str, key_b64: &str) -> Vec<u8> {
+    format!("tlsupporter-grant-key:{team_id}:{key_b64}").into_bytes()
 }
 
 /// A change stamped this far ahead of the clock is refused: it would win over every later one.
@@ -238,6 +244,10 @@ pub struct Directory {
     /// The main PC confirms roles and rights with its signature. Once set it stays set, and
     /// from then on a change that gives more needs that signature.
     pub owner_signs: bool,
+    /// The key the main PC confirms rights with, kept in the profile of its Windows user, and
+    /// the main PC's device signature over it. Set once. Until then the device key itself signs.
+    pub grant_key_b64: String,
+    pub grant_key_sig_b64: String,
 }
 
 fn merge_map<T: Clone>(mine: &mut BTreeMap<String, T>, other: &BTreeMap<String, T>, rev: impl Fn(&T) -> &Rev) -> bool {
@@ -319,9 +329,40 @@ impl Directory {
         (secure::device_id(&public) == self.owner_id).then_some(public)
     }
 
-    /// The main PC confirmed this record's role, state, rights and groups as they are now.
+    /// The separate key for rights, when the main PC has set one and signed it.
+    fn checked_grant_key(&self, key_b64: &str, sig_b64: &str) -> Option<Vec<u8>> {
+        let (device, key, sig) = (self.owner_key()?, secure::unb64(key_b64).ok()?, secure::unb64(sig_b64).ok()?);
+        (key.len() == 32 && secure::verify(&device, &grant_key_message(&self.team_id, key_b64), &sig)).then_some(key)
+    }
+
+    /// The key that confirms rights: the separate one once it is set, the device key before.
+    fn grant_key(&self) -> Option<Vec<u8>> {
+        if self.grant_key_b64.is_empty() {
+            self.owner_key()
+        } else {
+            self.checked_grant_key(&self.grant_key_b64, &self.grant_key_sig_b64)
+        }
+    }
+
+    pub fn has_grant_key(&self) -> bool {
+        !self.grant_key_b64.is_empty()
+    }
+
+    /// Run on the main PC once: from now on only this key confirms rights.
+    pub fn set_grant_key(&mut self, identity: &secure::Identity, public: &[u8]) -> bool {
+        if self.has_grant_key() || self.owner_id != identity.id || self.owner_key().as_deref() != Some(&identity.public[..]) {
+            return false;
+        }
+        let key_b64 = secure::b64(public);
+        let Ok(sig) = secure::sign(&identity.pkcs8, &grant_key_message(&self.team_id, &key_b64)) else { return false };
+        self.grant_key_b64 = key_b64;
+        self.grant_key_sig_b64 = secure::b64(&sig);
+        true
+    }
+
+    /// The main PC confirmed this record's role, state, rights and group as they are now.
     pub fn grant_valid(&self, m: &Member) -> bool {
-        let (Some(key), Ok(sig)) = (self.owner_key(), secure::unb64(&m.grant_sig_b64)) else { return false };
+        let (Some(key), Ok(sig)) = (self.grant_key(), secure::unb64(&m.grant_sig_b64)) else { return false };
         secure::verify(&key, &grant_message(&self.team_id, m), &sig)
     }
 
@@ -332,9 +373,23 @@ impl Directory {
 
     /// Run on the main PC only: confirms every record it holds that is not confirmed yet.
     pub fn sign_grants(&mut self, identity: &secure::Identity) -> bool {
+        self.sign_grants_with(identity, None)
+    }
+
+    /// `grant_private` is the separate key for rights. Without it only a team that has none yet
+    /// is signed, with the device key.
+    pub fn sign_grants_with(&mut self, identity: &secure::Identity, grant_private: Option<&[u8]>) -> bool {
         if self.owner_id != identity.id || self.owner_key().as_deref() != Some(&identity.public[..]) {
             return false;
         }
+        let signer = if self.has_grant_key() {
+            match grant_private {
+                Some(p) if secure::public_of(p).is_some() && secure::public_of(p) == self.grant_key() => p.to_vec(),
+                _ => return false,
+            }
+        } else {
+            identity.pkcs8.clone()
+        };
         let mut changed = !self.owner_signs;
         self.owner_signs = true;
         let unsigned: Vec<String> = self.members.values().filter(|m| !self.grant_valid(m)).map(|m| m.id.clone()).collect();
@@ -343,7 +398,7 @@ impl Directory {
             let Some(m) = self.members.get_mut(&id) else { continue };
             let mut signed = m.clone();
             signed.grant_ts = now_ms().max(m.grant_ts + 1);
-            let Ok(sig) = secure::sign(&identity.pkcs8, &grant_message(&team_id, &signed)) else { continue };
+            let Ok(sig) = secure::sign(&signer, &grant_message(&team_id, &signed)) else { continue };
             signed.grant_sig_b64 = secure::b64(&sig);
             // Newer, so that it spreads, but still naming the lead who made the change: a PC
             // made a lead trusts that lead without asking.
@@ -371,7 +426,34 @@ impl Directory {
         }
         // Without administration a lead manages only employees' PCs in their own groups.
         let employee = v.role == Role::Agent && cur.is_none_or(|c| c.role == Role::Agent && c.rights == v.rights && c.lead_groups == v.lead_groups);
-        employee && (author.lead_groups.is_empty() || author.lead_groups.contains(&v.group))
+        let reaches = |g: &String| author.lead_groups.is_empty() || author.lead_groups.contains(g);
+        employee && reaches(&v.group) && cur.is_none_or(|c| reaches(&c.group))
+    }
+
+    /// An approved lead with the administration right.
+    fn is_admin(&self, id: &str) -> bool {
+        self.member(id).is_some_and(|a| a.role == Role::Lead && a.state == MemberState::Approved && a.rights.admin)
+    }
+
+    /// Whoever sent the change may take this much away. An empty author is a copy from this PC
+    /// itself, not from the network.
+    fn may_reduce(&self, author: &str, cur: &Member) -> bool {
+        // The main PC's own record changes only with its signature, or nobody could confirm anything.
+        if cur.id == self.owner_id {
+            return false;
+        }
+        author.is_empty() || author == cur.id || cur.role == Role::Agent || self.is_admin(author)
+    }
+
+    /// Whoever sent the change may move this PC from its group into the new one.
+    fn may_move(&self, author: &str, cur: &Member, to: &str) -> bool {
+        if author.is_empty() || author == cur.id || self.is_admin(author) {
+            return true;
+        }
+        self.member(author).is_some_and(|a| {
+            let reaches = |g: &str| a.lead_groups.is_empty() || a.lead_groups.iter().any(|x| x == g);
+            a.role == Role::Lead && a.state == MemberState::Approved && reaches(&cur.group) && reaches(to)
+        })
     }
 
     fn merge_members(&mut self, other: &Directory, src: MergeFrom) -> bool {
@@ -389,7 +471,12 @@ impl Directory {
             let plain = !guarded
                 || match cur {
                     None => v.state != MemberState::Approved || self.grant_valid(v),
-                    Some(c) => v.same_grant(c) || (self.grant_valid(v) && v.grant_ts > c.grant_ts) || v.grants_within(c),
+                    Some(c) => {
+                        let confirmed = self.grant_valid(v) && v.grant_ts > c.grant_ts;
+                        let rights = v.same_grant(c) || (v.grants_within(c) && self.may_reduce(src.from, c));
+                        let place = v.group == c.group || self.may_move(src.from, c, &v.group);
+                        confirmed || (rights && place)
+                    }
                 };
             let by_owner = !plain && self.owner_takes(v, cur, src);
             if !plain && !by_owner {
@@ -402,7 +489,7 @@ impl Directory {
             }
             if let Some(c) = cur {
                 if !self.grant_valid(&next) {
-                    if next.same_grant(c) && self.grant_valid(c) {
+                    if next.same_grant(c) && next.group == c.group && self.grant_valid(c) {
                         // An older version passed the record on without the confirmation.
                         next.grant_ts = c.grant_ts;
                         next.grant_sig_b64 = c.grant_sig_b64.clone();
@@ -447,6 +534,12 @@ impl Directory {
         }
         if other.owner_signs && !self.owner_signs {
             self.owner_signs = true;
+            changed = true;
+        }
+        // Set once, and only as the main PC's device key signed it.
+        if !self.has_grant_key() && self.checked_grant_key(&other.grant_key_b64, &other.grant_key_sig_b64).is_some() {
+            self.grant_key_b64 = other.grant_key_b64.clone();
+            self.grant_key_sig_b64 = other.grant_key_sig_b64.clone();
             changed = true;
         }
         changed |= self.merge_members(other, src);
@@ -923,15 +1016,15 @@ struct AuthorityFile {
 }
 
 /// In the profile of the Windows account that runs the console. The system processes never
-/// use the key, so they get no path.
-fn authority_path() -> Option<PathBuf> {
+/// use these keys, so they get no path.
+fn user_secret_path(name: &str) -> Option<PathBuf> {
     if crate::util::test_env("TLS_DATA_DIR").is_some() {
-        return Some(data_dir().join("authority.bin"));
+        return Some(data_dir().join(name));
     }
     if std::env::args().any(|a| a == "--service" || a == "--system-agent") {
         return None;
     }
-    Some(local_app_data()?.join("TLSupporter").join("authority.bin"))
+    Some(local_app_data()?.join("TLSupporter").join(name))
 }
 
 fn local_app_data() -> Option<PathBuf> {
@@ -945,46 +1038,69 @@ fn local_app_data() -> Option<PathBuf> {
     }
 }
 
-fn load_authority() -> Option<AuthorityFile> {
-    let bytes = std::fs::read(authority_path()?).ok()?;
+const AUTHORITY_FILE: &str = "authority.bin";
+/// The main PC's key for confirming rights.
+const GRANT_FILE: &str = "grant.bin";
+
+fn load_user_secret(name: &str) -> Option<AuthorityFile> {
+    let bytes = std::fs::read(user_secret_path(name)?).ok()?;
     let plain = secure::dpapi_unprotect_user(&bytes).ok()?;
     serde_json::from_slice(&plain).ok()
 }
 
-fn store_authority(team_id: &str, private_b64: &str) -> Result<()> {
-    // Saving happens often, the key rarely changes.
-    static STORED: parking_lot::Mutex<Option<(String, String)>> = parking_lot::Mutex::new(None);
-    let path = authority_path().ok_or_else(|| anyhow::anyhow!("no place for the team key"))?;
-    let wanted = (team_id.to_string(), private_b64.to_string());
-    if STORED.lock().as_ref() == Some(&wanted) && path.exists() {
+fn store_user_secret(name: &str, team_id: &str, private_b64: &str) -> Result<()> {
+    // Saving happens often, the keys rarely change.
+    static STORED: parking_lot::Mutex<Vec<(String, String, String)>> = parking_lot::Mutex::new(Vec::new());
+    let path = user_secret_path(name).ok_or_else(|| anyhow::anyhow!("no place for the key"))?;
+    let wanted = (name.to_string(), team_id.to_string(), private_b64.to_string());
+    if STORED.lock().contains(&wanted) && path.exists() {
         return Ok(());
     }
-    if load_authority().is_some_and(|a| a.team_id == team_id && a.private_b64 == private_b64) {
-        *STORED.lock() = Some(wanted);
-        return Ok(());
+    let same = |a: &AuthorityFile| a.team_id == team_id && a.private_b64 == private_b64;
+    if !load_user_secret(name).is_some_and(|a| same(&a)) {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let file = AuthorityFile { team_id: team_id.to_string(), private_b64: private_b64.to_string() };
+        let blob = secure::dpapi_protect_user(&serde_json::to_vec(&file)?)?;
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, blob)?;
+        std::fs::rename(tmp, &path)?;
+        // Read back before any other copy of the key is dropped.
+        if !load_user_secret(name).is_some_and(|a| same(&a)) {
+            anyhow::bail!("key could not be read back");
+        }
     }
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let file = AuthorityFile { team_id: team_id.to_string(), private_b64: private_b64.to_string() };
-    let blob = secure::dpapi_protect_user(&serde_json::to_vec(&file)?)?;
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, blob)?;
-    std::fs::rename(tmp, &path)?;
-    // Read back before the copy in the shared file is dropped.
-    if !load_authority().is_some_and(|a| a.team_id == team_id && a.private_b64 == private_b64) {
-        anyhow::bail!("team key could not be read back");
-    }
-    *STORED.lock() = Some(wanted);
+    let mut stored = STORED.lock();
+    stored.retain(|s| s.0 != name);
+    stored.push(wanted);
     Ok(())
 }
 
+fn load_authority() -> Option<AuthorityFile> {
+    load_user_secret(AUTHORITY_FILE)
+}
+
+fn store_authority(team_id: &str, private_b64: &str) -> Result<()> {
+    store_user_secret(AUTHORITY_FILE, team_id, private_b64)
+}
+
 fn remove_authority() {
-    if let Some(path) = authority_path() {
-        let _ = std::fs::remove_file(path);
+    for name in [AUTHORITY_FILE, GRANT_FILE] {
+        if let Some(path) = user_secret_path(name) {
+            let _ = std::fs::remove_file(path);
+        }
     }
 }
 
+/// The main PC's key for confirming rights in this team, when this Windows user holds it.
+pub fn load_grant_private(team_id: &str) -> Option<Vec<u8>> {
+    load_user_secret(GRANT_FILE).filter(|a| a.team_id == team_id).and_then(|a| secure::unb64(&a.private_b64).ok())
+}
+
+pub fn store_grant_private(team_id: &str, private: &[u8]) -> Result<()> {
+    store_user_secret(GRANT_FILE, team_id, &secure::b64(private))
+}
 pub fn load_audit() -> Vec<LogEntry> {
     load_protected(audit_path())
 }
@@ -1377,6 +1493,125 @@ mod tests {
         let mut other = d.clone();
         assert!(!other.merge(&change));
         assert!(other.member(&stranger.id).is_none());
+    }
+
+    #[test]
+    fn the_main_pc_cannot_be_revoked_without_its_own_signature() {
+        let (owner, lead, _agent, d) = signed_team();
+        let mut forged = d.clone();
+        let m = forged.members.get_mut(&owner.id).unwrap();
+        m.state = MemberState::Revoked;
+        later(m, &lead.id);
+        let mut main = d.clone();
+        assert!(!main.merge_from(&forged, MergeFrom { me: &owner.id, from: &lead.id }));
+        assert_eq!(main.members[&owner.id].state, MemberState::Approved);
+        let mut other = d.clone();
+        assert!(!other.merge_from(&forged, MergeFrom { me: &lead.id, from: &lead.id }));
+    }
+
+    #[test]
+    fn a_plain_lead_cannot_revoke_an_administrator() {
+        let (owner, lead, _agent, mut d) = signed_team();
+        let admin = real_identity();
+        d.members.insert(
+            admin.id.clone(),
+            Member { id: admin.id.clone(), public_b64: secure::b64(&admin.public), role: Role::Lead, state: MemberState::Approved, rights: Rights { admin: true, ..Default::default() }, rev: Rev::new(&owner.id), ..Default::default() },
+        );
+        assert!(d.sign_grants(&owner));
+        let mut forged = d.clone();
+        let m = forged.members.get_mut(&admin.id).unwrap();
+        m.state = MemberState::Revoked;
+        later(m, &lead.id);
+        let mut other = d.clone();
+        assert!(!other.merge_from(&forged, MergeFrom { me: "x", from: &lead.id }));
+        assert_eq!(other.members[&admin.id].state, MemberState::Approved);
+        // An administrator may.
+        let mut by_admin = d.clone();
+        assert!(by_admin.merge_from(&forged, MergeFrom { me: "x", from: &admin.id }));
+        assert_eq!(by_admin.members[&admin.id].state, MemberState::Revoked);
+    }
+
+    #[test]
+    fn a_lead_of_the_group_revokes_an_employee() {
+        let (_owner, lead, agent, d) = signed_team();
+        let mut change = d.clone();
+        let m = change.members.get_mut(&agent.id).unwrap();
+        m.state = MemberState::Revoked;
+        later(m, &lead.id);
+        let mut other = d.clone();
+        assert!(other.merge_from(&change, MergeFrom { me: "x", from: &lead.id }));
+        assert_eq!(other.members[&agent.id].state, MemberState::Revoked);
+    }
+
+    #[test]
+    fn the_main_pc_changes_its_own_record() {
+        let (owner, _lead, _agent, d) = signed_team();
+        let mut main = d.clone();
+        let m = main.members.get_mut(&owner.id).unwrap();
+        m.rights.full_access = false;
+        later(m, &owner.id);
+        assert!(main.sign_grants(&owner));
+        let mut other = d.clone();
+        assert!(other.merge_from(&main, MergeFrom { me: "x", from: &owner.id }));
+        assert!(!other.members[&owner.id].rights.full_access);
+    }
+
+    #[test]
+    fn a_lead_limited_to_its_groups_cannot_pull_in_a_pc_of_another_group() {
+        let (owner, lead, agent, mut d) = signed_team();
+        d.members.get_mut(&lead.id).unwrap().lead_groups = vec!["g2".into()];
+        assert!(d.sign_grants(&owner));
+        let mut forged = d.clone();
+        let m = forged.members.get_mut(&agent.id).unwrap();
+        m.group = "g2".into();
+        later(m, &lead.id);
+        let mut other = d.clone();
+        assert!(!other.merge_from(&forged, MergeFrom { me: "x", from: &lead.id }));
+        assert_eq!(other.members[&agent.id].group, "g1");
+        // Nor through the main PC.
+        let mut main = d.clone();
+        assert!(!main.merge_from(&forged, MergeFrom { me: &owner.id, from: &lead.id }));
+        // Within its own groups it may.
+        let mut inside = d.clone();
+        inside.members.get_mut(&lead.id).unwrap().lead_groups = vec!["g1".into(), "g2".into()];
+        assert!(inside.sign_grants(&owner));
+        let mut moved = inside.clone();
+        let m = moved.members.get_mut(&agent.id).unwrap();
+        m.group = "g2".into();
+        later(m, &lead.id);
+        let mut other = inside.clone();
+        assert!(other.merge_from(&moved, MergeFrom { me: "x", from: &lead.id }));
+    }
+
+    #[test]
+    fn once_the_main_pc_has_its_key_for_rights_the_device_key_no_longer_confirms() {
+        let (owner, lead, _agent, mut d) = signed_team();
+        let (grant_private, grant_public) = secure::generate_authority().unwrap();
+        assert!(d.set_grant_key(&owner, &grant_public));
+        // Records signed with the device key are no longer confirmed.
+        assert!(!d.grant_valid(&d.members[&lead.id]));
+        assert!(!d.sign_grants(&owner), "the device key alone does not sign any more");
+        assert!(d.sign_grants_with(&owner, Some(&grant_private)));
+        assert!(d.grant_valid(&d.members[&lead.id]));
+        // The key is set once: another one, even signed by the device key, is ignored.
+        let mut other = d.clone();
+        let mut rival = d.clone();
+        rival.grant_key_b64.clear();
+        let (_p2, public2) = secure::generate_authority().unwrap();
+        assert!(rival.set_grant_key(&owner, &public2));
+        other.merge(&rival);
+        assert_eq!(other.grant_key_b64, d.grant_key_b64);
+        // A PC that had no key yet takes it from the main PC's copy, and only the main PC sets one.
+        let (owner2, lead2, _agent2, plain) = signed_team();
+        let (p3, k3) = secure::generate_authority().unwrap();
+        assert!(!plain.clone().set_grant_key(&lead2, &k3));
+        let mut main2 = plain.clone();
+        assert!(main2.set_grant_key(&owner2, &k3));
+        assert!(main2.sign_grants_with(&owner2, Some(&p3)));
+        let mut fresh = plain.clone();
+        assert!(fresh.merge(&main2));
+        assert_eq!(fresh.grant_key_b64, main2.grant_key_b64);
+        assert!(fresh.grant_valid(&fresh.members[&lead2.id]));
     }
 
     #[test]

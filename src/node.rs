@@ -117,6 +117,8 @@ pub struct Node {
     leaving: std::sync::atomic::AtomicBool,
     /// PCs this lead has already given its newer version to during this run.
     offered: Mutex<HashSet<String>>,
+    /// On the main PC: the key that confirms rights, from this Windows user's profile.
+    grant_private: Mutex<Option<Vec<u8>>>,
     /// PCs that lost access and were told so during this run.
     told_revoked: Mutex<HashSet<String>>,
     pub secure_peers: Mutex<HashMap<String, Arc<Peer>>>,
@@ -355,12 +357,43 @@ impl Node {
         self.peers.lock().get(id).cloned()
     }
 
+    /// On the main PC: confirms with its key every record not confirmed yet. The first time,
+    /// it makes that key and keeps it in this Windows user's profile.
+    pub fn confirm_grants(&self, d: &mut Directory) -> bool {
+        if d.is_empty() || d.owner_id != self.identity.id {
+            return false;
+        }
+        let mut key = self.grant_private.lock();
+        if key.is_none() {
+            *key = model::load_grant_private(&d.team_id);
+        }
+        let mut changed = false;
+        if !d.has_grant_key() && key.is_none() {
+            match secure::generate_authority() {
+                Ok((private, public)) => match model::store_grant_private(&d.team_id, &private) {
+                    Ok(()) if d.set_grant_key(&self.identity, &public) => {
+                        crate::logi!("main PC made its own key for confirming rights");
+                        *key = Some(private);
+                        changed = true;
+                    }
+                    Ok(()) => {}
+                    Err(e) => crate::logi!("key for confirming rights not stored, the device key still signs: {e}"),
+                },
+                Err(e) => crate::logi!("key for confirming rights not made: {e}"),
+            }
+        }
+        if d.has_grant_key() && key.is_none() {
+            static ONCE: std::sync::Once = std::sync::Once::new();
+            ONCE.call_once(|| crate::logi!("this Windows user has no key for confirming rights, changes wait"));
+        }
+        changed | d.sign_grants_with(&self.identity, key.as_deref())
+    }
     /// Change team data, store it and send it to every connected PC.
     pub fn update_directory(self: &Arc<Self>, f: impl FnOnce(&mut Directory, &str)) {
         {
             let mut st = self.state.write();
             f(&mut st.directory, &self.identity.id);
-            st.directory.sign_grants(&self.identity);
+            self.confirm_grants(&mut st.directory);
         }
         self.save();
         self.broadcast_directory();
@@ -803,7 +836,7 @@ impl Node {
                     let mut st = self.state.write();
                     let src = model::MergeFrom { me: &self.identity.id, from: &peer.id };
                     // The main PC confirms at once what it has just taken from a lead.
-                    st.directory.merge_from(&d, src) | st.directory.sign_grants(&self.identity)
+                    st.directory.merge_from(&d, src) | self.confirm_grants(&mut st.directory)
                 };
                 if changed {
                     self.save();
@@ -1137,6 +1170,7 @@ pub fn start(identity: Identity, state: LocalState, ui: crate::agent_ui::UiHandl
             audit_dirty: std::sync::atomic::AtomicBool::new(false),
             leaving: std::sync::atomic::AtomicBool::new(false),
             offered: Mutex::new(HashSet::new()),
+            grant_private: Mutex::new(None),
             told_revoked: Mutex::new(HashSet::new()),
             secure_peers: Mutex::new(HashMap::new()),
             secure_dialing: Mutex::new(HashSet::new()),
@@ -1150,7 +1184,7 @@ pub fn start(identity: Identity, state: LocalState, ui: crate::agent_ui::UiHandl
         // The main PC of a team from an older version confirms what it holds now, once.
         let signed = {
             let mut st = node.state.write();
-            st.directory.sign_grants(&node.identity)
+            node.confirm_grants(&mut st.directory)
         };
         if signed {
             crate::logi!("main PC confirmed roles and rights of the team");

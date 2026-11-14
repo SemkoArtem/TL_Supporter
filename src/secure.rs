@@ -159,6 +159,13 @@ pub fn generate_authority() -> Result<(Vec<u8>, Vec<u8>)> {
     Ok((doc.as_ref().to_vec(), pair.public_key().as_ref().to_vec()))
 }
 
+/// The public half of a private key.
+pub fn public_of(pkcs8: &[u8]) -> Option<Vec<u8>> {
+    use signature::KeyPair;
+    let pair = signature::Ed25519KeyPair::from_pkcs8(pkcs8).ok()?;
+    Some(pair.public_key().as_ref().to_vec())
+}
+
 pub fn sign(pkcs8: &[u8], msg: &[u8]) -> Result<Vec<u8>> {
     let pair = signature::Ed25519KeyPair::from_pkcs8(pkcs8).map_err(|_| anyhow!("bad key"))?;
     Ok(pair.sign(msg).as_ref().to_vec())
