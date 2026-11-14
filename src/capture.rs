@@ -286,34 +286,88 @@ fn open_duplication(index: u8) -> Result<Duplication> {
     }
 }
 
-/// Returns true when `frame` was replaced with a new image.
-fn grab(d: &Duplication, frame: &mut Vec<u8>) -> Result<bool> {
+/// A changed part of the screen: left, top, width, height.
+pub type Area = (u32, u32, u32, u32);
+
+/// More separate areas than this are treated as a change of the whole screen.
+const MAX_AREAS: usize = 256;
+
+/// The parts of the frame Windows reports as changed, or `None` when it does not say.
+unsafe fn changed_areas(d: &Duplication, info: &DXGI_OUTDUPL_FRAME_INFO) -> Option<Vec<Area>> {
+    let size = info.TotalMetadataBufferSize as usize;
+    if size == 0 {
+        return None;
+    }
+    let (w, h) = (d.width as i32, d.height as i32);
+    let clamp = |l: i32, t: i32, r: i32, b: i32| -> Option<Area> {
+        let (l, t, r, b) = (l.clamp(0, w), t.clamp(0, h), r.clamp(0, w), b.clamp(0, h));
+        (r > l && b > t).then_some((l as u32, t as u32, (r - l) as u32, (b - t) as u32))
+    };
+    let mut out = Vec::new();
+    let mut moves = vec![DXGI_OUTDUPL_MOVE_RECT::default(); size / std::mem::size_of::<DXGI_OUTDUPL_MOVE_RECT>() + 1];
+    let mut used = 0u32;
+    d.dup.GetFrameMoveRects((moves.len() * std::mem::size_of::<DXGI_OUTDUPL_MOVE_RECT>()) as u32, moves.as_mut_ptr(), &mut used).ok()?;
+    for m in &moves[..used as usize / std::mem::size_of::<DXGI_OUTDUPL_MOVE_RECT>()] {
+        let r = m.DestinationRect;
+        out.extend(clamp(r.left, r.top, r.right, r.bottom));
+        // The place the content moved away from shows something else now too.
+        let (sx, sy) = (m.SourcePoint.x, m.SourcePoint.y);
+        out.extend(clamp(sx, sy, sx + (r.right - r.left), sy + (r.bottom - r.top)));
+    }
+    let mut dirty = vec![windows::Win32::Foundation::RECT::default(); size / std::mem::size_of::<windows::Win32::Foundation::RECT>() + 1];
+    let mut used = 0u32;
+    d.dup.GetFrameDirtyRects((dirty.len() * std::mem::size_of::<windows::Win32::Foundation::RECT>()) as u32, dirty.as_mut_ptr(), &mut used).ok()?;
+    for r in &dirty[..used as usize / std::mem::size_of::<windows::Win32::Foundation::RECT>()] {
+        out.extend(clamp(r.left, r.top, r.right, r.bottom));
+    }
+    (out.len() <= MAX_AREAS).then_some(out)
+}
+
+/// Returns whether `frame` changed, and which parts of it when Windows told. Only those parts
+/// are copied, the rest of `frame` still holds the previous image.
+fn grab(d: &Duplication, frame: &mut Vec<u8>) -> Result<(bool, Option<Vec<Area>>)> {
     unsafe {
         let _ = &d.device;
         let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
         let mut resource = None;
         match d.dup.AcquireNextFrame(150, &mut info, &mut resource) {
             Ok(()) => {}
-            Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => return Ok(false),
+            Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => return Ok((false, Some(Vec::new()))),
             Err(e) => return Err(e.into()),
         }
-        let changed = info.LastPresentTime != 0 || frame.is_empty();
+        let row = d.width as usize * 4;
+        let whole = frame.len() != row * d.height as usize;
+        let changed = info.LastPresentTime != 0 || whole;
+        let mut areas = None;
         if changed {
+            areas = if whole { None } else { changed_areas(d, &info) };
             let resource = resource.context("no frame")?;
             let tex: ID3D11Texture2D = resource.cast()?;
             d.context.CopyResource(&d.staging, &tex);
             let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
             d.context.Map(&d.staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
-            let row = d.width as usize * 4;
             frame.resize(row * d.height as usize, 0);
-            for y in 0..d.height as usize {
-                let src = (mapped.pData as *const u8).add(y * mapped.RowPitch as usize);
-                std::ptr::copy_nonoverlapping(src, frame.as_mut_ptr().add(y * row), row);
+            let pitch = mapped.RowPitch as usize;
+            let base = mapped.pData as *const u8;
+            match &areas {
+                Some(list) => {
+                    for &(x, y, w, h) in list {
+                        let (x, w) = (x as usize * 4, w as usize * 4);
+                        for line in y as usize..(y + h) as usize {
+                            std::ptr::copy_nonoverlapping(base.add(line * pitch + x), frame.as_mut_ptr().add(line * row + x), w);
+                        }
+                    }
+                }
+                None => {
+                    for y in 0..d.height as usize {
+                        std::ptr::copy_nonoverlapping(base.add(y * pitch), frame.as_mut_ptr().add(y * row), row);
+                    }
+                }
             }
             d.context.Unmap(&d.staging, 0);
         }
         d.dup.ReleaseFrame()?;
-        Ok(changed)
+        Ok((changed, areas))
     }
 }
 
@@ -411,15 +465,38 @@ fn encode_tile(pixels: &[u8], w: u16, h: u16, quality: u8) -> Option<Vec<u8>> {
 pub struct ProfileState {
     prev: Vec<u8>,
     last: Option<Instant>,
+    /// Parts of the screen changed since this profile last looked. `None` means anywhere.
+    areas: Option<Vec<Area>>,
 }
 
 /// Find changed tiles in `image`, compress them and return `(index, jpeg)` pairs.
 pub fn diff_and_encode(prev: &mut Vec<u8>, image: &[u8], w: u32, h: u32, tile: u32, quality: u8) -> Vec<(usize, Vec<u8>)> {
+    diff_and_encode_areas(prev, image, w, h, tile, quality, None)
+}
+
+/// Same, looking only at tiles that touch `areas` when they are known.
+pub fn diff_and_encode_areas(prev: &mut Vec<u8>, image: &[u8], w: u32, h: u32, tile: u32, quality: u8, areas: Option<&[Area]>) -> Vec<(usize, Vec<u8>)> {
     let tile_w = tile.min(w);
     let tile_h = tile.min(h);
     let cols = w.div_ceil(tile_w);
     let rows = h.div_ceil(tile_h);
     let first = prev.len() != image.len();
+    let touched = areas.filter(|_| !first).map(|list| {
+        let mut mask = vec![false; (cols * rows) as usize];
+        for &(x, y, aw, ah) in list {
+            if aw == 0 || ah == 0 {
+                continue;
+            }
+            let (c0, c1) = ((x / tile_w).min(cols - 1), ((x + aw - 1) / tile_w).min(cols - 1));
+            let (r0, r1) = ((y / tile_h).min(rows - 1), ((y + ah - 1) / tile_h).min(rows - 1));
+            for r in r0..=r1 {
+                for c in c0..=c1 {
+                    mask[(r * cols + c) as usize] = true;
+                }
+            }
+        }
+        mask
+    });
     if first {
         prev.clear();
         prev.resize(image.len(), 0);
@@ -428,6 +505,9 @@ pub fn diff_and_encode(prev: &mut Vec<u8>, image: &[u8], w: u32, h: u32, tile: u
     let mut changed = Vec::new();
     for ry in 0..rows {
         for cx in 0..cols {
+            if touched.as_ref().is_some_and(|m| !m[(ry * cols + cx) as usize]) {
+                continue;
+            }
             let (x, y) = (cx * tile_w, ry * tile_h);
             let (cw, ch) = (tile_w.min(w - x), tile_h.min(h - y));
             let mut differs = first;
@@ -469,6 +549,8 @@ pub fn diff_and_encode(prev: &mut Vec<u8>, image: &[u8], w: u32, h: u32, tile: u
 }
 
 fn process(profile: Profile, state: &mut ProfileState, publisher: &ProfilePub, frame: &[u8], w: u32, h: u32) {
+    // Known changed parts help only at full size. Scaled images are compared whole.
+    let areas = state.areas.replace(Vec::new()).filter(|_| profile.scale_div(w) == 1);
     let div = profile.scale_div(w);
     let scaled;
     let (image, iw, ih): (&[u8], u32, u32) = if div > 1 {
@@ -478,7 +560,7 @@ fn process(profile: Profile, state: &mut ProfileState, publisher: &ProfilePub, f
         (frame, w, h)
     };
     let tile = profile.tile().min(iw.max(ih));
-    let results = diff_and_encode(&mut state.prev, image, iw, ih, tile, profile.quality());
+    let results = diff_and_encode_areas(&mut state.prev, image, iw, ih, tile, profile.quality(), areas.as_deref());
     if results.is_empty() {
         return;
     }
@@ -505,7 +587,7 @@ fn worker_loop(index: u8, monitor: &Monitor, secure: bool) {
     let mut gdi_rect: Option<(i32, i32, i32, i32)> = None;
     let mut next_duplication_try = Instant::now();
     let mut states: HashMap<Profile, ProfileState> =
-        PROFILES.iter().map(|p| (*p, ProfileState { prev: Vec::new(), last: None })).collect();
+        PROFILES.iter().map(|p| (*p, ProfileState { prev: Vec::new(), last: None, areas: None })).collect();
     let mut frame = Vec::new();
     let mut dup: Option<Duplication> = None;
     let mut idle_since: Option<Instant> = None;
@@ -531,6 +613,7 @@ fn worker_loop(index: u8, monitor: &Monitor, secure: bool) {
                 let s = states.get_mut(&p).unwrap();
                 s.prev.clear();
                 s.last = None;
+                s.areas = None;
             }
         }
         if let Some(due) = next_due.filter(|d| *d > now) {
@@ -560,10 +643,14 @@ fn worker_loop(index: u8, monitor: &Monitor, secure: bool) {
             }
         }
         let mut changed = true;
+        let mut areas: Option<Vec<Area>> = None;
         let (w, h) = if let Some(d) = dup.as_ref() {
             let size = (d.width, d.height);
             match grab(d, &mut frame) {
-                Ok(c) => changed = c,
+                Ok((c, a)) => {
+                    changed = c;
+                    areas = a;
+                }
                 Err(e) => {
                     crate::logi!("capture lost: {e}");
                     dup = None;
@@ -587,6 +674,15 @@ fn worker_loop(index: u8, monitor: &Monitor, secure: bool) {
         if frame.is_empty() {
             continue;
         }
+        // Every profile collects what changed until its next picture is due.
+        if changed {
+            for s in states.values_mut() {
+                match (&mut s.areas, &areas) {
+                    (Some(have), Some(new)) if have.len() + new.len() <= MAX_AREAS => have.extend_from_slice(new),
+                    _ => s.areas = None,
+                }
+            }
+        }
         for p in PROFILES {
             let publisher = &monitor.pubs[&p];
             if publisher.subs.load(Ordering::SeqCst) == 0 {
@@ -594,6 +690,7 @@ fn worker_loop(index: u8, monitor: &Monitor, secure: bool) {
                 let s = states.get_mut(&p).unwrap();
                 s.prev.clear();
                 s.last = None;
+                s.areas = None;
                 continue;
             }
             let s = states.get_mut(&p).unwrap();
@@ -645,6 +742,21 @@ mod tests {
     }
 
     #[test]
+    fn only_tiles_touched_by_reported_changes_are_compared() {
+        let mut prev = Vec::new();
+        let mut img = image(300, 200, 100);
+        diff_and_encode(&mut prev, &img, 300, 200, 128, 70);
+        img[(150 * 300 + 200) * 4] = 7;
+        // Windows said the change is in the top left corner: the other tile is not looked at.
+        let mut copy = prev.clone();
+        assert!(diff_and_encode_areas(&mut copy, &img, 300, 200, 128, 70, Some(&[(0, 0, 10, 10)])).is_empty());
+        // A reported area across two tiles covers the changed one.
+        let r = diff_and_encode_areas(&mut prev, &img, 300, 200, 128, 70, Some(&[(120, 140, 100, 20)]));
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].0, 3 + 1);
+    }
+
+    #[test]
     fn jpeg_tile_decodes() {
         let mut prev = Vec::new();
         let r = diff_and_encode(&mut prev, &image(128, 128, 200), 128, 128, 128, 80);
@@ -662,4 +774,5 @@ mod tests {
         assert_eq!((w, h), (2, 1));
         assert_eq!(out[0], 50);
     }
+
 }
