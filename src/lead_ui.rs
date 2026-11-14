@@ -102,6 +102,8 @@ pub struct LeadApp {
     /// The monitor the employee's cursor moved to, and since when. Following waits a moment,
     /// so that a cursor passing over the edge does not switch the picture back and forth.
     follow_seen: Option<(u8, std::time::Instant)>,
+    /// The journal rows on screen: journal revision, search, when, rows.
+    journal_rows: Option<(u64, String, std::time::Instant, Vec<model::LogEntry>)>,
     selected: std::collections::HashSet<String>,
     collapsed: std::collections::HashSet<String>,
     renaming: Option<(String, String)>,
@@ -197,6 +199,7 @@ impl LeadApp {
             pointer_last: [0.0, 0.0],
             hints_open: true,
             follow_seen: None,
+            journal_rows: None,
             selected: Default::default(),
             collapsed: Default::default(),
             renaming: None,
@@ -1196,15 +1199,20 @@ impl LeadApp {
     }
 
     fn update_thumb(&mut self, ctx: &egui::Context, id: &str) {
-        let l = self.node.lead.lock();
-        let Some(t) = l.targets.get(id) else { return };
-        let Some((w, h, rgba)) = &t.thumb else { return };
-        if self.thumbs.get(id).map(|x| x.0) == Some(t.thumb_rev) {
-            return;
-        }
-        let image = egui::ColorImage::from_rgba_unmultiplied([*w, *h], rgba);
+        let shown = self.thumbs.get(id).map(|x| x.0);
+        // Copied out, then converted and uploaded without holding up the network and sound.
+        let (rev, w, h, rgba) = {
+            let l = self.node.lead.lock();
+            let Some(t) = l.targets.get(id) else { return };
+            let Some((w, h, rgba)) = &t.thumb else { return };
+            if shown == Some(t.thumb_rev) {
+                return;
+            }
+            (t.thumb_rev, *w, *h, rgba.clone())
+        };
+        let image = egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba);
         let handle = ctx.load_texture(format!("thumb-{id}"), image, TextureOptions::LINEAR);
-        self.thumbs.insert(id.to_string(), (t.thumb_rev, handle));
+        self.thumbs.insert(id.to_string(), (rev, handle));
     }
 
     fn update_screen_texture(&mut self, ctx: &egui::Context, id: &str) {
@@ -1734,6 +1742,15 @@ impl LeadApp {
             });
             ui.separator();
             let needle = self.journal_filter.to_lowercase();
+            // Filtering 20 000 entries on every frame made the page slow: done only when the
+            // journal or the search changes, and every few seconds for changes of the team.
+            let rev = self.node.audit_rev.load(Ordering::Relaxed);
+            let fresh = self.journal_rows.as_ref().is_some_and(|(r, n, at, _)| *r == rev && *n == needle && at.elapsed() < std::time::Duration::from_secs(5));
+            if fresh {
+                let rows = self.journal_rows.as_ref().map(|c| &c.3).unwrap();
+                Self::journal_table(ui, rows);
+                return;
+            }
             let log = self.node.audit.lock().clone();
             // A lead without the administration right sees what concerns their own groups.
             let (admin, my_name, reach_ids, reach_names) = {
@@ -1748,25 +1765,30 @@ impl LeadApp {
             let mine = |e: &model::LogEntry| {
                 admin || e.lead == my_name || if e.target_id.is_empty() { reach_names.contains(&e.target) } else { reach_ids.contains(&e.target_id) }
             };
-            let rows: Vec<&model::LogEntry> = log
-                .iter()
+            let rows: Vec<model::LogEntry> = log
+                .into_iter()
                 .rev()
                 .filter(|e| mine(e))
                 .filter(|e| needle.is_empty() || format!("{} {} {}", e.lead, e.target, e.action).to_lowercase().contains(&needle))
                 .collect();
-            egui::ScrollArea::vertical().auto_shrink([false; 2]).show_rows(ui, 20.0, rows.len(), |ui, range| {
-                for e in &rows[range] {
-                    ui.horizontal(|ui| {
-                        for (width, text) in [(150.0, format_ts(e.ts)), (160.0, e.lead.clone()), (160.0, e.target.clone())] {
-                            ui.allocate_ui_with_layout(Vec2::new(width, 18.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                                ui.set_width(width);
-                                ui.add(egui::Label::new(text).truncate());
-                            });
-                        }
-                        ui.label(tr(&e.action));
-                    });
-                }
-            });
+            Self::journal_table(ui, &rows);
+            self.journal_rows = Some((rev, needle, std::time::Instant::now(), rows));
+        });
+    }
+
+    fn journal_table(ui: &mut egui::Ui, rows: &[model::LogEntry]) {
+        egui::ScrollArea::vertical().auto_shrink([false; 2]).show_rows(ui, 20.0, rows.len(), |ui, range| {
+            for e in &rows[range] {
+                ui.horizontal(|ui| {
+                    for (width, text) in [(150.0, format_ts(e.ts)), (160.0, e.lead.clone()), (160.0, e.target.clone())] {
+                        ui.allocate_ui_with_layout(Vec2::new(width, 18.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            ui.set_width(width);
+                            ui.add(egui::Label::new(text).truncate());
+                        });
+                    }
+                    ui.label(tr(&e.action));
+                });
+            }
         });
     }
 

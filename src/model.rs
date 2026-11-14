@@ -952,6 +952,7 @@ fn audit_path() -> PathBuf {
 pub fn factory_reset() -> Result<()> {
     save_state(&LocalState::default())?;
     let _ = std::fs::remove_file(audit_path());
+    let _ = std::fs::remove_file(audit_tail_path());
     Ok(())
 }
 
@@ -1101,12 +1102,41 @@ pub fn load_grant_private(team_id: &str) -> Option<Vec<u8>> {
 pub fn store_grant_private(team_id: &str, private: &[u8]) -> Result<()> {
     store_user_secret(GRANT_FILE, team_id, &secure::b64(private))
 }
-pub fn load_audit() -> Vec<LogEntry> {
-    load_protected(audit_path())
+/// New journal entries are added to the end of this file in small sealed batches, so that the
+/// whole journal is not written again every time. It is folded into `audit.bin` now and then.
+fn audit_tail_path() -> PathBuf {
+    data_dir().join("audit.tail")
 }
 
+pub fn load_audit() -> Vec<LogEntry> {
+    let mut log: Vec<LogEntry> = load_protected(audit_path());
+    let tail = std::fs::read_to_string(audit_tail_path()).unwrap_or_default();
+    for line in tail.lines() {
+        let batch: Option<Vec<LogEntry>> = secure::unb64(line.trim())
+            .ok()
+            .and_then(|b| secure::dpapi_unprotect(&b).ok())
+            .and_then(|b| serde_json::from_slice(&b).ok());
+        if let Some(batch) = batch {
+            merge_audit(&mut log, &batch);
+        }
+    }
+    log
+}
+
+/// Writes the whole journal and empties the file of added entries.
 pub fn save_audit(log: &[LogEntry]) -> Result<()> {
-    save_protected(audit_path(), &log.to_vec())
+    save_protected(audit_path(), &log.to_vec())?;
+    let _ = std::fs::remove_file(audit_tail_path());
+    Ok(())
+}
+
+/// Adds entries to the end of the journal without writing the rest again.
+pub fn append_audit(entries: &[LogEntry]) -> Result<()> {
+    use std::io::Write;
+    let blob = secure::dpapi_protect(&serde_json::to_vec(entries)?)?;
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(audit_tail_path())?;
+    f.write_all(format!("{}\n", secure::b64(&blob)).as_bytes())?;
+    Ok(())
 }
 
 pub fn state_mtime() -> Option<std::time::SystemTime> {
@@ -1115,15 +1145,20 @@ pub fn state_mtime() -> Option<std::time::SystemTime> {
 
 /// Merge audit entries and keep the newest 20000.
 pub fn merge_audit(mine: &mut Vec<LogEntry>, other: &[LogEntry]) -> bool {
-    let known: std::collections::HashSet<String> = mine.iter().map(|e| e.id.clone()).collect();
-    let before = mine.len();
-    mine.extend(other.iter().filter(|e| !known.contains(&e.id)).cloned());
-    let changed = mine.len() != before;
-    if changed {
+    !merge_audit_added(mine, other).is_empty()
+}
+
+/// Same, returning the entries that were new here.
+pub fn merge_audit_added(mine: &mut Vec<LogEntry>, other: &[LogEntry]) -> Vec<LogEntry> {
+    let known: std::collections::HashSet<&str> = mine.iter().map(|e| e.id.as_str()).collect();
+    let mut seen = std::collections::HashSet::new();
+    let added: Vec<LogEntry> = other.iter().filter(|e| !known.contains(e.id.as_str()) && seen.insert(e.id.clone())).cloned().collect();
+    if !added.is_empty() {
+        mine.extend(added.iter().cloned());
         mine.sort_by_key(|e| e.ts);
         trim_journal(mine);
     }
-    changed
+    added
 }
 
 #[cfg(test)]
@@ -1621,5 +1656,6 @@ mod tests {
         assert!(m.rights.draw);
         assert!(!m.rights.full_access, "full access must be granted explicitly");
     }
+
 
 }

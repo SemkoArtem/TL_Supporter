@@ -32,6 +32,9 @@ pub struct NetConfig {
 /// The secure discovery port is always this far above the normal one.
 pub const SECURE_DISCOVERY_OFFSET: u16 = 3;
 
+/// Batches added to the end of the journal file before the whole journal is written again.
+const AUDIT_FOLD_AFTER: usize = 300;
+
 /// Journal entries per message when two leads exchange their journals.
 const LOG_SYNC_PART: usize = 1000;
 
@@ -61,12 +64,48 @@ pub struct Peer {
     pub conn: quinn::Connection,
     pub app_version: String,
     tx: mpsc::UnboundedSender<Msg>,
+    /// Messages waiting to be written to the network.
+    queued: Arc<std::sync::atomic::AtomicUsize>,
 }
 
+/// Beyond this many waiting messages, cursor and pointer positions are skipped: newer ones follow.
+const QUEUE_SKIP_MOVES: usize = 64;
+/// Beyond this many the link is stuck and is closed. Connecting again sends everything afresh.
+const QUEUE_CLOSE: usize = 5000;
+
 impl Peer {
-    pub fn send(&self, m: Msg) {
-        let _ = self.tx.send(m);
+    fn new(id: String, is_lead: bool, conn: quinn::Connection, app_version: String, tx: mpsc::UnboundedSender<Msg>) -> (Self, Arc<std::sync::atomic::AtomicUsize>) {
+        let queued = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        (Self { id, is_lead, conn, app_version, tx, queued: queued.clone() }, queued)
     }
+
+    pub fn send(&self, m: Msg) {
+        use std::sync::atomic::Ordering;
+        let waiting = self.queued.load(Ordering::Relaxed);
+        if waiting >= QUEUE_SKIP_MOVES && matches!(m, Msg::Cursor { .. } | Msg::Pointer { on: true, .. }) {
+            return;
+        }
+        if waiting >= QUEUE_CLOSE {
+            self.conn.close(0u32.into(), b"queue full");
+            return;
+        }
+        if self.tx.send(m).is_ok() {
+            self.queued.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Writes queued messages to the network and keeps the count of waiting ones.
+fn spawn_writer(mut rx: mpsc::UnboundedReceiver<Msg>, mut send: quinn::SendStream, queued: Arc<std::sync::atomic::AtomicUsize>) {
+    tokio::spawn(async move {
+        while let Some(m) = rx.recv().await {
+            queued.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            let Ok(bytes) = proto::encode(&m) else { continue };
+            if send.write_all(&bytes).await.is_err() {
+                break;
+            }
+        }
+    });
 }
 
 #[derive(Clone, Debug)]
@@ -113,6 +152,11 @@ pub struct Node {
     pub console_started: std::sync::atomic::AtomicU8,
     /// The journal has entries not yet written to disk.
     audit_dirty: std::sync::atomic::AtomicBool,
+    /// Journal entries not on disk yet, and how many batches were added to the end of the file.
+    audit_new: Mutex<Vec<LogEntry>>,
+    /// Grows with every change of the journal, so that the console redraws it only then.
+    pub audit_rev: std::sync::atomic::AtomicU64,
+    audit_batches: std::sync::atomic::AtomicUsize,
     /// This PC lost its access and is already leaving the team.
     leaving: std::sync::atomic::AtomicBool,
     /// PCs this lead has already given its newer version to during this run.
@@ -465,6 +509,8 @@ impl Node {
                 log.push(entry.clone());
                 model::trim_journal(&mut log);
             }
+            self.audit_new.lock().push(entry.clone());
+            self.audit_rev.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             self.audit_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
         }
         for p in self.peers.lock().values().filter(|p| p.is_lead) {
@@ -549,9 +595,21 @@ impl Node {
 
     /// Writing the journal gets slower as it grows, so entries are saved together every 2 seconds.
     pub fn flush_audit(&self) {
-        if self.audit_dirty.swap(false, std::sync::atomic::Ordering::Relaxed) {
-            let log = self.audit.lock().clone();
-            let _ = model::save_audit(&log);
+        use std::sync::atomic::Ordering;
+        if !self.audit_dirty.swap(false, Ordering::Relaxed) {
+            return;
+        }
+        // Only the new entries are written, the whole journal now and then.
+        let fresh = std::mem::take(&mut *self.audit_new.lock());
+        let batches = self.audit_batches.load(Ordering::Relaxed);
+        if !fresh.is_empty() && batches < AUDIT_FOLD_AFTER && model::append_audit(&fresh).is_ok() {
+            self.audit_batches.store(batches + 1, Ordering::Relaxed);
+            return;
+        }
+        let log = self.audit.lock().clone();
+        match model::save_audit(&log) {
+            Ok(()) => self.audit_batches.store(0, Ordering::Relaxed),
+            Err(e) => crate::logi!("journal not saved: {e}"),
         }
     }
 
@@ -620,18 +678,12 @@ impl Node {
         if hello.id != id || !hello.secure_channel {
             bail!("unexpected secure peer");
         }
-        let (tx, mut rx) = mpsc::unbounded_channel::<Msg>();
-        let peer = Arc::new(Peer { id: id.clone(), is_lead: false, conn: conn.clone(), app_version: hello.app_version, tx });
+        let (tx, rx) = mpsc::unbounded_channel::<Msg>();
+        let (peer, queued) = Peer::new(id.clone(), false, conn.clone(), hello.app_version, tx);
+        let peer = Arc::new(peer);
         self.secure_peers.lock().insert(id.clone(), peer.clone());
         crate::logi!("secure link up: {id}");
-        tokio::spawn(async move {
-            while let Some(m) = rx.recv().await {
-                let Ok(bytes) = proto::encode(&m) else { continue };
-                if send.write_all(&bytes).await.is_err() {
-                    break;
-                }
-            }
-        });
+        spawn_writer(rx, send, queued);
         let uni_node = self.clone();
         let uni_peer = peer.clone();
         let uni_conn = conn.clone();
@@ -733,27 +785,14 @@ impl Node {
             bail!("access revoked, the PC was told");
         }
         let is_lead = self.admit_peer(&hello, &public, outgoing)?;
-        let (tx, mut rx) = mpsc::unbounded_channel::<Msg>();
-        let peer = Arc::new(Peer {
-            id: hello.id.clone(),
-            is_lead,
-            conn: conn.clone(),
-            app_version: hello.app_version.clone(),
-            tx,
-        });
+        let (tx, rx) = mpsc::unbounded_channel::<Msg>();
+        let (peer, queued) = Peer::new(hello.id.clone(), is_lead, conn.clone(), hello.app_version.clone(), tx);
+        let peer = Arc::new(peer);
         if let Some(old) = self.peers.lock().insert(peer.id.clone(), peer.clone()) {
             old.conn.close(0u32.into(), b"replaced");
         }
         crate::logi!("connected: {} lead={is_lead} v{}", peer.id, hello.app_version);
-
-        tokio::spawn(async move {
-            while let Some(m) = rx.recv().await {
-                let Ok(bytes) = proto::encode(&m) else { continue };
-                if send.write_all(&bytes).await.is_err() {
-                    break;
-                }
-            }
-        });
+        spawn_writer(rx, send, queued);
 
         if self.is_lead() {
             let d = self.state.read().directory.clone();
@@ -850,7 +889,10 @@ impl Node {
                 if !peer.is_lead || !self.is_lead() || !self.is_approved_lead_peer(&peer.id) {
                     return;
                 }
-                if model::merge_audit(&mut self.audit.lock(), &entries) {
+                let added = model::merge_audit_added(&mut self.audit.lock(), &entries);
+                if !added.is_empty() {
+                    self.audit_new.lock().extend(added);
+                    self.audit_rev.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     self.audit_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
             }
@@ -1168,6 +1210,10 @@ pub fn start(identity: Identity, state: LocalState, ui: crate::agent_ui::UiHandl
             add_check: Mutex::new(None),
             console_started: std::sync::atomic::AtomicU8::new(0),
             audit_dirty: std::sync::atomic::AtomicBool::new(false),
+            audit_new: Mutex::new(Vec::new()),
+            audit_rev: std::sync::atomic::AtomicU64::new(0),
+            // The first save after a start folds in whatever was added before.
+            audit_batches: std::sync::atomic::AtomicUsize::new(AUDIT_FOLD_AFTER),
             leaving: std::sync::atomic::AtomicBool::new(false),
             offered: Mutex::new(HashSet::new()),
             grant_private: Mutex::new(None),
