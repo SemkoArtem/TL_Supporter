@@ -237,6 +237,20 @@ pub async fn receive_update(mut s: quinn::RecvStream) -> Result<()> {
         let _ = s.stop(0u32.into());
         return Ok(());
     };
+    // A sender that goes quiet must not hold the only place for an update.
+    match tokio::time::timeout(RECEIVE_LIMIT, receive_file(&mut s)).await {
+        Ok(result) => result,
+        Err(_) => {
+            let _ = s.stop(0u32.into());
+            bail!("update took too long")
+        }
+    }
+}
+
+/// The whole file, at most this long. 200 MB at 1 MB/s still fits.
+const RECEIVE_LIMIT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+async fn receive_file(s: &mut quinn::RecvStream) -> Result<()> {
     let mut len = [0u8; 2];
     s.read_exact(&mut len).await?;
     let len = u16::from_le_bytes(len) as usize;
@@ -259,7 +273,7 @@ pub async fn receive_update(mut s: quinn::RecvStream) -> Result<()> {
     if size > MAX_SIZE {
         bail!("update too large");
     }
-    let exe = read_in_parts(&mut s, size as usize).await?;
+    let exe = read_in_parts(s, size as usize).await?;
     if !verify_release(&version, &exe, &sig) {
         bail!("bad update signature");
     }
