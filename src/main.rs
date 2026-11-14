@@ -217,6 +217,8 @@ fn real_main() -> Result<()> {
             Some("--dev-watch") => return devtest::watch(identity, args[1].parse()?),
             Some("--dev-code-wait") => return devtest::code_wait(&identity, &args[1], &args[2]),
             Some("--dev-code-add") => return devtest::code_add(identity, &args[1]),
+            Some("--dev-key-backup") => return devtest::key_backup(identity, &args[1], &args[2]),
+            Some("--dev-key-restore") => return devtest::key_restore(identity, &args[1], &args[2], args[3].parse()?),
             _ => {}
         }
     }

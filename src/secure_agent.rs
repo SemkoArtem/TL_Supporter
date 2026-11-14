@@ -77,8 +77,11 @@ impl Secure {
         let m = d.member(lead)?;
         // The data file is open to every user here. Once the main PC is remembered, only rights
         // it confirmed count, and only from that same PC.
-        let owner = self.pin.read().as_ref().map(|p| p.owner_id.clone()).unwrap_or_default();
+        let (owner, grant_key) = self.pin.read().as_ref().map(|p| (p.owner_id.clone(), p.grant_key_b64.clone())).unwrap_or_default();
         if !owner.is_empty() && (d.owner_id != owner || !d.grant_valid(m)) {
+            return None;
+        }
+        if !grant_key.is_empty() && d.grant_key_b64 != grant_key {
             return None;
         }
         Some(m.rights.clone()).filter(|r| r.full_access)
@@ -93,12 +96,15 @@ impl Secure {
             let d = &st.directory;
             // The main PC is remembered the first time it is seen confirming rights.
             let owner = if d.owner_signs && !d.owner_id.is_empty() && d.member(&d.owner_id).is_some_and(|m| d.grant_valid(m)) { d.owner_id.clone() } else { String::new() };
+            // The key for rights is remembered when it is first seen confirming the main PC.
+            let grant_key = if !owner.is_empty() && d.has_grant_key() { d.grant_key_b64.clone() } else { String::new() };
             let new_pin = model::TeamPin {
                 team_id: d.team_id.clone(),
                 authority_b64: d.authority_public_b64.clone(),
                 signed: d.admin_password_signed_by(&d.authority_public_b64),
                 released: false,
                 owner_id: owner.clone(),
+                grant_key_b64: grant_key.clone(),
             };
             match known {
                 Some(pin) if pin.released && !d.is_empty() && d.team_id != pin.team_id => new_pin,
@@ -106,6 +112,14 @@ impl Secure {
                     pin.signed |= d.team_id == pin.team_id && d.admin_password_signed_by(&pin.authority_b64);
                     if pin.owner_id.is_empty() && d.team_id == pin.team_id {
                         pin.owner_id = owner;
+                    }
+                    if pin.grant_key_b64.is_empty() && d.team_id == pin.team_id && !grant_key.is_empty() && pin.owner_id == d.owner_id {
+                        pin.grant_key_b64 = grant_key;
+                    }
+                    // The main PC moved to another PC with a backup of the remembered key.
+                    if !pin.grant_key_b64.is_empty() && d.team_id == pin.team_id && d.grant_key_b64 == pin.grant_key_b64 && pin.owner_id != d.owner_id && d.owner_move_valid() {
+                        crate::logi!("main PC moved to another PC with the key for rights");
+                        pin.owner_id = d.owner_id.clone();
                     }
                     pin
                 }

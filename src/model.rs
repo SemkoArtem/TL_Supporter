@@ -123,6 +123,10 @@ fn grant_message(team_id: &str, m: &Member) -> Vec<u8> {
     format!("tlsupporter-grant2:{team_id}:{}:{:?}:{:?}:{bits}:{}:{}:{}", m.id, m.role, m.state, sorted(&m.lead_groups).join(","), m.group, m.grant_ts).into_bytes()
 }
 
+fn owner_move_message(team_id: &str, owner_id: &str, ts: i64) -> Vec<u8> {
+    format!("tlsupporter-owner-move:{team_id}:{owner_id}:{ts}").into_bytes()
+}
+
 fn grant_key_message(team_id: &str, key_b64: &str) -> Vec<u8> {
     format!("tlsupporter-grant-key:{team_id}:{key_b64}").into_bytes()
 }
@@ -248,6 +252,10 @@ pub struct Directory {
     /// the main PC's device signature over it. Set once. Until then the device key itself signs.
     pub grant_key_b64: String,
     pub grant_key_sig_b64: String,
+    /// The role of the main PC moved to `owner_id` from a backup of the key for rights: when,
+    /// and that key's signature over it.
+    pub owner_move_ts: i64,
+    pub owner_move_sig_b64: String,
 }
 
 fn merge_map<T: Clone>(mine: &mut BTreeMap<String, T>, other: &BTreeMap<String, T>, rev: impl Fn(&T) -> &Rev) -> bool {
@@ -542,6 +550,7 @@ impl Directory {
             self.grant_key_sig_b64 = other.grant_key_sig_b64.clone();
             changed = true;
         }
+        changed |= self.take_owner_move(other);
         changed |= self.merge_members(other, src);
         changed |= merge_map(&mut self.groups, &other.groups, |g| &g.rev);
         changed |= merge_map(&mut self.phrases, &other.phrases, |p| &p.rev);
@@ -557,6 +566,56 @@ impl Directory {
             changed = true;
         }
         changed
+    }
+
+    /// The move of the main PC is signed with the key for rights itself.
+    pub fn owner_move_valid(&self) -> bool {
+        let (Ok(key), Ok(sig)) = (secure::unb64(&self.grant_key_b64), secure::unb64(&self.owner_move_sig_b64)) else { return false };
+        self.owner_move_ts > 0 && secure::verify(&key, &owner_move_message(&self.team_id, &self.owner_id, self.owner_move_ts), &sig)
+    }
+
+    /// Another PC became the main one from a backup of the key: taken when that same key signed
+    /// it and the new main PC signed the key with its device key.
+    fn take_owner_move(&mut self, other: &Directory) -> bool {
+        if !self.has_grant_key() || other.grant_key_b64 != self.grant_key_b64 || other.owner_move_ts <= self.owner_move_ts || other.owner_id == self.owner_id {
+            return false;
+        }
+        let mut next = self.clone();
+        next.owner_id = other.owner_id.clone();
+        next.owner_move_ts = other.owner_move_ts;
+        next.owner_move_sig_b64 = other.owner_move_sig_b64.clone();
+        next.grant_key_sig_b64 = other.grant_key_sig_b64.clone();
+        if next.members.get(&next.owner_id).is_none() {
+            if let Some(m) = other.members.get(&other.owner_id) {
+                next.members.insert(m.id.clone(), m.clone());
+            }
+        }
+        if !next.owner_move_valid() || next.checked_grant_key(&next.grant_key_b64, &next.grant_key_sig_b64).is_none() {
+            return false;
+        }
+        *self = next;
+        true
+    }
+
+    /// Makes this PC the main one with the key for rights from a backup.
+    pub fn move_owner_here(&mut self, identity: &secure::Identity, grant_private: &[u8]) -> Result<()> {
+        let public = secure::public_of(grant_private).ok_or_else(|| anyhow::anyhow!("bad key"))?;
+        if !self.has_grant_key() || secure::b64(&public) != self.grant_key_b64 {
+            anyhow::bail!("{}", crate::i18n::tr("Ця копія від іншої команди або від іншого ключа."));
+        }
+        let me = self.members.get_mut(&identity.id).ok_or_else(|| anyhow::anyhow!("this PC is not in the team"))?;
+        me.public_b64 = secure::b64(&identity.public);
+        me.role = Role::Lead;
+        me.state = MemberState::Approved;
+        me.rights = Rights { admin: true, full_access: true, ..Default::default() };
+        me.lead_groups.clear();
+        me.rev = Rev::new(&identity.id);
+        self.owner_id = identity.id.clone();
+        self.owner_move_ts = now_ms().max(self.owner_move_ts + 1);
+        self.owner_move_sig_b64 = secure::b64(&secure::sign(grant_private, &owner_move_message(&self.team_id, &self.owner_id, self.owner_move_ts))?);
+        self.grant_key_sig_b64 = secure::b64(&secure::sign(&identity.pkcs8, &grant_key_message(&self.team_id, &self.grant_key_b64))?);
+        self.sign_grants_with(identity, Some(grant_private));
+        Ok(())
     }
 
     /// Only leads can do this, because only they hold the team's private key.
@@ -671,6 +730,9 @@ pub struct TeamPin {
     /// The main PC, remembered once it confirms rights with its signature. From then on a lead
     /// gets secure screens only with rights that PC confirmed.
     pub owner_id: String,
+    /// The key for rights, remembered once it is seen. A move of the main PC counts only when
+    /// this key signed it.
+    pub grant_key_b64: String,
 }
 
 /// Asks the service to let this PC leave its team. Sits in the data folder only for a moment.
@@ -700,7 +762,8 @@ pub fn load_team_pin() -> Option<TeamPin> {
     let signed = lines.next() == Some("1");
     let released = lines.next() == Some("1");
     let owner_id = lines.next().unwrap_or_default().trim().to_string();
-    Some(TeamPin { team_id, authority_b64, signed, released, owner_id })
+    let grant_key_b64 = lines.next().unwrap_or_default().trim().to_string();
+    Some(TeamPin { team_id, authority_b64, signed, released, owner_id, grant_key_b64 })
 }
 
 pub fn save_team_pin(pin: &TeamPin) -> bool {
@@ -709,7 +772,7 @@ pub fn save_team_pin(pin: &TeamPin) -> bool {
         let _ = std::fs::create_dir_all(parent);
     }
     let flag = |on: bool| if on { "1" } else { "0" };
-    std::fs::write(path, format!("{}\n{}\n{}\n{}\n{}", pin.team_id, pin.authority_b64, flag(pin.signed), flag(pin.released), pin.owner_id)).is_ok()
+    std::fs::write(path, format!("{}\n{}\n{}\n{}\n{}\n{}", pin.team_id, pin.authority_b64, flag(pin.signed), flag(pin.released), pin.owner_id, pin.grant_key_b64)).is_ok()
 }
 
 pub fn remove_team_pin() {
@@ -875,6 +938,8 @@ pub struct LeadSettings {
     pub auto_update: bool,
     /// The session shows the monitor where the employee's cursor is.
     pub follow_cursor: bool,
+    /// A backup of the main PC's key for rights was saved on this PC.
+    pub grant_backup_saved: bool,
 }
 
 impl Default for LeadSettings {
@@ -909,6 +974,7 @@ impl Default for LeadSettings {
             show_taps: true,
             auto_update: true,
             follow_cursor: false,
+            grant_backup_saved: false,
         }
     }
 }
@@ -1102,7 +1168,54 @@ pub fn load_grant_private(team_id: &str) -> Option<Vec<u8>> {
 pub fn store_grant_private(team_id: &str, private: &[u8]) -> Result<()> {
     store_user_secret(GRANT_FILE, team_id, &secure::b64(private))
 }
-/// New journal entries are added to the end of this file in small sealed batches, so that the
+
+/// A backup of the main PC's key for rights, sealed with a password of its own.
+#[derive(Serialize, Deserialize, Default)]
+#[serde(default)]
+struct GrantBackup {
+    kind: String,
+    team_id: String,
+    team_name: String,
+    grant_key_b64: String,
+    made_ms: i64,
+    sealed_b64: String,
+}
+
+const BACKUP_KIND: &str = "tlsupporter-grant-key-backup";
+pub const BACKUP_MIN_PASSWORD: usize = 10;
+
+pub fn make_grant_backup(d: &Directory, private: &[u8], password: &str) -> Result<Vec<u8>> {
+    if password.chars().count() < BACKUP_MIN_PASSWORD {
+        anyhow::bail!("{}", crate::i18n::tr("Пароль копії має бути не коротшим за 10 символів."));
+    }
+    let backup = GrantBackup {
+        kind: BACKUP_KIND.into(),
+        team_id: d.team_id.clone(),
+        team_name: d.team_name.clone(),
+        grant_key_b64: d.grant_key_b64.clone(),
+        made_ms: now_ms(),
+        sealed_b64: secure::b64(&secure::seal_backup(password, private)?),
+    };
+    Ok(serde_json::to_vec_pretty(&backup)?)
+}
+
+/// The key for rights from a backup, checked to belong to this team.
+pub fn open_grant_backup(d: &Directory, bytes: &[u8], password: &str) -> Result<Vec<u8>> {
+    use crate::i18n::tr;
+    let backup: GrantBackup = serde_json::from_slice(bytes).map_err(|_| anyhow::anyhow!("{}", tr("Це не файл резервної копії ключа.")))?;
+    if backup.kind != BACKUP_KIND {
+        anyhow::bail!("{}", tr("Це не файл резервної копії ключа."));
+    }
+    if backup.team_id != d.team_id || backup.grant_key_b64 != d.grant_key_b64 {
+        anyhow::bail!("{}", tr("Ця копія від іншої команди або від іншого ключа."));
+    }
+    let sealed = secure::unb64(&backup.sealed_b64)?;
+    let private = secure::open_backup(password, &sealed).map_err(|_| anyhow::anyhow!("{}", tr("Невірний пароль копії.")))?;
+    if secure::public_of(&private).map(|p| secure::b64(&p)) != Some(d.grant_key_b64.clone()) {
+        anyhow::bail!("{}", tr("Ця копія від іншої команди або від іншого ключа."));
+    }
+    Ok(private)
+}/// New journal entries are added to the end of this file in small sealed batches, so that the
 /// whole journal is not written again every time. It is folded into `audit.bin` now and then.
 fn audit_tail_path() -> PathBuf {
     data_dir().join("audit.tail")
@@ -1225,7 +1338,7 @@ mod tests {
         d.authority_private_b64 = secure::b64(&private);
         d.authority_public_b64 = secure::b64(&public);
         d.sign_admin_password();
-        let pin = TeamPin { team_id: d.team_id.clone(), authority_b64: d.authority_public_b64.clone(), signed: true, released: false, owner_id: String::new() };
+        let pin = TeamPin { team_id: d.team_id.clone(), authority_b64: d.authority_public_b64.clone(), signed: true, released: false, owner_id: String::new(), grant_key_b64: String::new() };
         let good = LocalState { directory: d.clone(), ..Default::default() };
         assert!(admin_password_accepted(&good, Some(&pin), "realpassword"));
         assert!(!admin_password_accepted(&good, Some(&pin), "wrong"));
@@ -1248,7 +1361,7 @@ mod tests {
         let id = identity(1);
         let mut d = Directory::new("T", &id, "L", secure::hash_password("realpassword")).unwrap();
         d.policy.admin_sig_b64.clear();
-        let pin = TeamPin { team_id: d.team_id.clone(), authority_b64: d.authority_public_b64.clone(), signed: false, released: false, owner_id: String::new() };
+        let pin = TeamPin { team_id: d.team_id.clone(), authority_b64: d.authority_public_b64.clone(), signed: false, released: false, owner_id: String::new(), grant_key_b64: String::new() };
         let st = LocalState { directory: d, ..Default::default() };
         assert!(admin_password_accepted(&st, Some(&pin), "realpassword"));
         assert!(admin_password_accepted(&st, None, "realpassword"));
@@ -1258,7 +1371,7 @@ mod tests {
     fn a_released_pc_can_join_another_team_but_keeps_checking_its_own() {
         let id = identity(1);
         let d = Directory::new("T", &id, "L", secure::hash_password("realpassword")).unwrap();
-        let mut pin = TeamPin { team_id: "previous".into(), authority_b64: d.authority_public_b64.clone(), signed: true, released: false, owner_id: String::new() };
+        let mut pin = TeamPin { team_id: "previous".into(), authority_b64: d.authority_public_b64.clone(), signed: true, released: false, owner_id: String::new(), grant_key_b64: String::new() };
         let st = LocalState { directory: d.clone(), ..Default::default() };
         assert!(!admin_password_accepted(&st, Some(&pin), "realpassword"));
         pin.released = true;
@@ -1278,7 +1391,7 @@ mod tests {
         for pc in ["pc", "other"] {
             d.members.insert(pc.into(), Member { id: pc.into(), state: MemberState::Approved, ..Default::default() });
         }
-        let pin = TeamPin { team_id: d.team_id.clone(), authority_b64: d.authority_public_b64.clone(), signed: true, released: false, owner_id: String::new() };
+        let pin = TeamPin { team_id: d.team_id.clone(), authority_b64: d.authority_public_b64.clone(), signed: true, released: false, owner_id: String::new(), grant_key_b64: String::new() };
         let base = LocalState { directory: d.clone(), ..Default::default() };
         assert!(!release_allowed(&base, &pin, Some("pc"), REVOKED_REQUEST));
 
@@ -1647,6 +1760,64 @@ mod tests {
         assert!(fresh.merge(&main2));
         assert_eq!(fresh.grant_key_b64, main2.grant_key_b64);
         assert!(fresh.grant_valid(&fresh.members[&lead2.id]));
+    }
+
+    /// A team whose main PC already confirms rights with its separate key.
+    fn team_with_grant_key() -> (secure::Identity, secure::Identity, secure::Identity, Directory, Vec<u8>) {
+        let (owner, lead, agent, mut d) = signed_team();
+        let (private, public) = secure::generate_authority().unwrap();
+        assert!(d.set_grant_key(&owner, &public));
+        assert!(d.sign_grants_with(&owner, Some(&private)));
+        (owner, lead, agent, d, private)
+    }
+
+    #[test]
+    fn a_key_backup_opens_only_with_its_password_and_for_its_team() {
+        let (_owner, _lead, _agent, d, private) = team_with_grant_key();
+        assert!(make_grant_backup(&d, &private, "short").is_err());
+        let file = make_grant_backup(&d, &private, "a long backup password").unwrap();
+        assert_eq!(open_grant_backup(&d, &file, "a long backup password").unwrap(), private);
+        assert!(open_grant_backup(&d, &file, "a wrong password!!").is_err());
+        let (_o, _l, _a, other_team, _p) = team_with_grant_key();
+        assert!(open_grant_backup(&other_team, &file, "a long backup password").is_err());
+        assert!(open_grant_backup(&d, b"{\"kind\":\"something\"}", "a long backup password").is_err());
+    }
+
+    #[test]
+    fn a_lead_becomes_the_main_pc_with_the_backup_and_the_others_follow() {
+        let (owner, lead, agent, d, private) = team_with_grant_key();
+        let mut moved = d.clone();
+        moved.move_owner_here(&lead, &private).unwrap();
+        assert_eq!(moved.owner_id, lead.id);
+        assert!(moved.member(&lead.id).unwrap().rights.admin);
+        assert!(moved.grant_valid(&moved.members[&agent.id]));
+        // Another PC takes the move and the records the new main PC confirmed.
+        let mut other = d.clone();
+        assert!(other.merge_from(&moved, MergeFrom { me: &agent.id, from: &lead.id }));
+        assert_eq!(other.owner_id, lead.id);
+        assert!(other.member(&lead.id).unwrap().rights.admin);
+        assert!(other.grant_valid(&other.members[&agent.id]));
+        // The old main PC, when it comes back, follows too and confirms nothing any more.
+        let mut old = d.clone();
+        assert!(old.merge(&moved));
+        assert_eq!(old.owner_id, lead.id);
+        assert!(!old.sign_grants_with(&owner, Some(&private)));
+    }
+
+    #[test]
+    fn a_move_of_the_main_pc_without_its_key_is_refused() {
+        let (owner, lead, _agent, d, _private) = team_with_grant_key();
+        // A lead with a key of its own claims the main PC.
+        let mut forged = d.clone();
+        let (fake, _) = secure::generate_authority().unwrap();
+        assert!(forged.move_owner_here(&lead, &fake).is_err());
+        forged.owner_id = lead.id.clone();
+        forged.owner_move_ts = now_ms();
+        forged.owner_move_sig_b64 = secure::b64(&secure::sign(&fake, &owner_move_message(&d.team_id, &lead.id, forged.owner_move_ts)).unwrap());
+        forged.grant_key_sig_b64 = secure::b64(&secure::sign(&lead.pkcs8, &grant_key_message(&d.team_id, &d.grant_key_b64)).unwrap());
+        let mut other = d.clone();
+        other.merge(&forged);
+        assert_eq!(other.owner_id, owner.id);
     }
 
     #[test]

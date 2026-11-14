@@ -88,6 +88,22 @@ macro_rules! logi {
     ($($arg:tt)*) => { $crate::util::log_line(&format!($($arg)*)) };
 }
 
+/// The user's Documents folder.
+pub fn documents_dir() -> Option<PathBuf> {
+    use windows::Win32::System::Com::CoTaskMemFree;
+    use windows::Win32::UI::Shell::{FOLDERID_Documents, SHGetKnownFolderPath, KF_FLAG_DEFAULT};
+    unsafe {
+        let p = SHGetKnownFolderPath(&FOLDERID_Documents, KF_FLAG_DEFAULT, None).ok()?;
+        let path = p.to_string().ok();
+        CoTaskMemFree(Some(p.0 as *const _));
+        path.map(PathBuf::from)
+    }
+}
+
+/// Shows a file in Explorer.
+pub fn show_file(path: &std::path::Path) {
+    let _ = std::process::Command::new(windows_dir().join("explorer.exe")).arg(format!("/select,{}", path.display())).spawn();
+}
 /// The Windows folder, asked from the system rather than taken from the environment.
 pub fn windows_dir() -> PathBuf {
     let mut buf = [0u16; 260];

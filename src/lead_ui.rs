@@ -69,7 +69,12 @@ struct SettingsDraft {
     update_result: std::sync::Arc<parking_lot::Mutex<Option<String>>>,
     old_admin_pw: String,
     owner_pw: String,
-    role_error: String,
+    backup_pw: String,
+    backup_pw2: String,
+    backup_file: Option<std::path::PathBuf>,
+    restore_path: String,
+    restore_pw: String,
+    restore_error: String,    role_error: String,
     devices: Option<(Vec<(String, String)>, Vec<(String, String)>)>,
     add_code: String,
     add_group: String,
@@ -643,6 +648,15 @@ impl LeadApp {
                 ui.heading(tr("Працівники"));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.weak(format!("{} {}", tr("Версія"), crate::util::APP_VERSION));
+                    // Without a backup, losing this PC or its Windows account loses the key for rights.
+                    if !self.node.state.read().lead.grant_backup_saved && self.node.can_back_up_key() {
+                        ui.add_space(12.0);
+                        let link = ui.add(egui::Label::new(egui::RichText::new(tr("Резервної копії ключа головного ПК немає")).color(Color32::from_rgb(202, 130, 16))).sense(Sense::click()));
+                        if link.on_hover_text(tr("Налаштування, Команда")).clicked() {
+                            self.page = Page::Settings;
+                            self.tab = SettingsTab::Team;
+                        }
+                    }
                 });
             });
             ui.add_space(8.0);
@@ -2245,7 +2259,88 @@ impl LeadApp {
                 });
             });
         }
+        theme::card(ui, tr("Ключ головного ПК"), |ui| self.settings_key(ui));
         theme::card(ui, tr("Права керівників"), |ui| self.settings_leads(ui));
+    }
+
+    /// Backup of the main PC's key for rights, and making another PC the main one with it.
+    fn settings_key(&mut self, ui: &mut egui::Ui) {
+        if self.node.can_back_up_key() {
+            let saved = self.node.state.read().lead.grant_backup_saved;
+            ui.label(tr("Цим ключем головний ПК підтверджує права. Збережи копію на флешку або в менеджер паролів: з нею інший ПК керівника може стати головним, якщо цей ПК або його обліковий запис Windows пропаде."));
+            if saved {
+                ui.colored_label(Color32::from_rgb(108, 203, 95), tr("Резервну копію збережено."));
+            } else {
+                ui.colored_label(Color32::from_rgb(202, 130, 16), tr("Резервної копії ключа головного ПК немає"));
+            }
+            ui.weak(tr("Окремий пароль копії, не коротший за 10 символів. Краще не той, що адмінський: його знають усі керівники."));
+            ui.horizontal(|ui| {
+                theme::field(ui, &mut self.draft.backup_pw, tr("Пароль копії"), true, 200.0);
+                theme::field(ui, &mut self.draft.backup_pw2, tr("Ще раз"), true, 200.0);
+            });
+            if ui.button(tr("Зберегти резервну копію")).clicked() {
+                if self.draft.backup_pw != self.draft.backup_pw2 {
+                    self.draft.message = tr("Паролі не збігаються.").into();
+                } else {
+                    match self.node.save_key_backup(&self.draft.backup_pw) {
+                        Ok(path) => {
+                            self.draft.message = format!("{} {}", tr("Копію збережено:"), path.display());
+                            self.draft.backup_file = Some(path);
+                            self.draft.backup_pw.clear();
+                            self.draft.backup_pw2.clear();
+                        }
+                        Err(e) => self.draft.message = e.to_string(),
+                    }
+                }
+            }
+            if let Some(path) = self.draft.backup_file.clone() {
+                ui.horizontal(|ui| {
+                    ui.weak(path.display().to_string());
+                    if ui.button(tr("Показати файл")).clicked() {
+                        crate::util::show_file(&path);
+                    }
+                });
+                ui.weak(tr("Перенеси файл з цього ПК і запам'ятай пароль: без пароля копія не відкриється."));
+            }
+            return;
+        }
+        let has_key = self.node.state.read().directory.has_grant_key();
+        if !has_key {
+            ui.label(tr("Головний ПК ще не створив ключ для прав. Він зробить це сам, коли на ньому запуститься ця версія."));
+            return;
+        }
+        if self.node.is_main_pc() {
+            ui.colored_label(theme::danger(), tr("Цей ПК головний, але ключа для прав у цього облікового запису Windows немає. Відновити його можна з резервної копії."));
+        } else {
+            ui.label(tr("Якщо головний ПК пропав, цей ПК може стати головним з резервною копією його ключа."));
+        }
+        // A file dropped onto the window fills the path.
+        if let Some(path) = ui.ctx().input(|i| i.raw.dropped_files.iter().find_map(|f| f.path.clone())) {
+            self.draft.restore_path = path.display().to_string();
+        }
+        ui.horizontal(|ui| {
+            ui.add(egui::TextEdit::singleline(&mut self.draft.restore_path).desired_width(360.0).hint_text(tr("Шлях до файлу .tlskey або перетягни його сюди")));
+        });
+        ui.horizontal(|ui| {
+            theme::field(ui, &mut self.draft.restore_pw, tr("Пароль копії"), true, 200.0);
+            if ui.button(tr("Зробити цей ПК головним")).clicked() {
+                let path = self.draft.restore_path.trim().trim_matches('"').to_string();
+                let result = std::fs::read(&path)
+                    .map_err(|_| anyhow::anyhow!("{}", tr("Файл не знайдено.")))
+                    .and_then(|bytes| self.node.restore_main_pc(&bytes, &self.draft.restore_pw));
+                match result {
+                    Ok(()) => {
+                        self.draft.restore_error.clear();
+                        self.draft.message = tr("Цей ПК тепер головний.").into();
+                    }
+                    Err(e) => self.draft.restore_error = e.to_string(),
+                }
+                self.draft.restore_pw.clear();
+            }
+        });
+        if !self.draft.restore_error.is_empty() {
+            ui.colored_label(theme::danger(), &self.draft.restore_error);
+        }
     }
 
     fn settings_leads(&mut self, ui: &mut egui::Ui) {

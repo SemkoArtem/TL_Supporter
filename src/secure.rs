@@ -279,6 +279,31 @@ pub fn open_with_password(password: &str, blob: &[u8]) -> Result<Vec<u8>> {
     aead_open(&key, &blob[16..])
 }
 
+/// For a backup that may sit on a flash drive for years: much slower to guess.
+const BACKUP_ROUNDS: u32 = 1_000_000;
+
+fn derive_backup(password: &str, salt: &[u8], out: &mut [u8]) {
+    pbkdf2::derive(pbkdf2::PBKDF2_HMAC_SHA256, NonZeroU32::new(BACKUP_ROUNDS).unwrap(), salt, password.as_bytes(), out);
+}
+
+pub fn seal_backup(password: &str, plain: &[u8]) -> Result<Vec<u8>> {
+    let salt = random_bytes::<16>();
+    let mut key = [0u8; 32];
+    derive_backup(password, &salt, &mut key);
+    let mut out = salt.to_vec();
+    out.extend_from_slice(&aead_seal(&key, plain)?);
+    Ok(out)
+}
+
+pub fn open_backup(password: &str, blob: &[u8]) -> Result<Vec<u8>> {
+    if blob.len() < 16 {
+        return Err(anyhow!("data too short"));
+    }
+    let mut key = [0u8; 32];
+    derive_backup(password, &blob[..16], &mut key);
+    aead_open(&key, &blob[16..])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

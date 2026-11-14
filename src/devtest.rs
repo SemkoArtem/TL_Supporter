@@ -325,6 +325,8 @@ pub fn watch(identity: Identity, seconds: u64) -> Result<()> {
     for m in st.directory.members.values().filter(|m| m.id != node.identity.id) {
         println!("MEMBER role={:?} state={:?} version={}", m.role, m.state, node.peer(&m.id).map(|p| p.app_version.clone()).unwrap_or_default());
     }
+    let d = &st.directory;
+    println!("OWNER me={} has_key={} mine_confirmed={} admin={}", d.owner_id == node.identity.id, d.has_grant_key(), d.member(&node.identity.id).is_some_and(|m| d.grant_valid(m)), d.member(&node.identity.id).is_some_and(|m| m.rights.admin));
     for e in node.audit.lock().iter() {
         println!("JOURNAL {} | {} | target_id_set={}", e.action, e.target, !e.target_id.is_empty());
     }
@@ -467,4 +469,35 @@ fn send_test_voice(node: &std::sync::Arc<crate::node::Node>, target: &str) {
         let _ = peer.conn.send_datagram(bytes::Bytes::from(packet));
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+/// Saves a backup of the main PC's key for rights, as the settings button does.
+pub fn key_backup(identity: Identity, password: &str, out: &str) -> Result<()> {
+    let state = model::load_state();
+    let (ui, rx) = UiHandle::new();
+    std::thread::spawn(move || while rx.recv().is_ok() {});
+    let node = crate::node::start(identity, state, ui)?;
+    let path = node.save_key_backup(password)?;
+    std::fs::copy(&path, out)?;
+    let _ = std::fs::remove_file(&path);
+    println!("BACKUP_SAVED");
+    std::process::exit(0);
+}
+
+/// Makes this lead PC the main one with a backup, as the settings button does, then stays on
+/// the network for a while so that the others hear about it.
+pub fn key_restore(identity: Identity, file: &str, password: &str, seconds: u64) -> Result<()> {
+    let state = model::load_state();
+    let (ui, rx) = UiHandle::new();
+    std::thread::spawn(move || while rx.recv().is_ok() {});
+    let node = crate::node::start(identity, state, ui)?;
+    std::thread::sleep(Duration::from_secs(3));
+    match node.restore_main_pc(&std::fs::read(file)?, password) {
+        Ok(()) => println!("RESTORED"),
+        Err(e) => println!("REFUSED {e}"),
+    }
+    std::thread::sleep(Duration::from_secs(seconds));
+    let d = node.state.read().directory.clone();
+    println!("OWNER me={} admin={}", d.owner_id == node.identity.id, d.member(&node.identity.id).is_some_and(|m| m.rights.admin));
+    std::process::exit(0);
 }

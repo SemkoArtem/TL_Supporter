@@ -163,6 +163,8 @@ pub struct Node {
     offered: Mutex<HashSet<String>>,
     /// On the main PC: the key that confirms rights, from this Windows user's profile.
     grant_private: Mutex<Option<Vec<u8>>>,
+    /// The key for rights was already looked for in this Windows user's profile.
+    grant_tried: std::sync::atomic::AtomicBool,
     /// PCs that lost access and were told so during this run.
     told_revoked: Mutex<HashSet<String>>,
     pub secure_peers: Mutex<HashMap<String, Arc<Peer>>>,
@@ -431,6 +433,69 @@ impl Node {
             ONCE.call_once(|| crate::logi!("this Windows user has no key for confirming rights, changes wait"));
         }
         changed | d.sign_grants_with(&self.identity, key.as_deref())
+    }
+    pub fn is_main_pc(&self) -> bool {
+        self.state.read().directory.owner_id == self.identity.id
+    }
+
+    /// The main PC has its key for rights here, so a backup can be made.
+    pub fn can_back_up_key(&self) -> bool {
+        let st = self.state.read();
+        let d = &st.directory;
+        if d.owner_id != self.identity.id || !d.has_grant_key() {
+            return false;
+        }
+        let mut key = self.grant_private.lock();
+        // Asked on every frame of the console, so the profile is read only once.
+        if key.is_none() && !self.grant_tried.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            *key = model::load_grant_private(&d.team_id);
+        }
+        key.is_some()
+    }
+
+    /// Saves a backup of the main PC's key for rights in the Documents folder.
+    pub fn save_key_backup(self: &Arc<Self>, password: &str) -> Result<std::path::PathBuf> {
+        if !self.can_back_up_key() {
+            bail!("{}", crate::i18n::tr("Резервну копію можна зробити лише на головному ПК."));
+        }
+        let (bytes, team) = {
+            let st = self.state.read();
+            let key = self.grant_private.lock().clone().unwrap_or_default();
+            (model::make_grant_backup(&st.directory, &key, password)?, st.directory.team_name.clone())
+        };
+        let safe: String = team.chars().map(|c| if c.is_alphanumeric() || c == '-' { c } else { '_' }).collect();
+        let dir = crate::util::documents_dir().unwrap_or_else(crate::util::data_dir);
+        let path = dir.join(format!("TLSupporter-{safe}-key.tlskey"));
+        std::fs::write(&path, bytes)?;
+        {
+            let mut st = self.state.write();
+            st.lead.grant_backup_saved = true;
+        }
+        self.save();
+        self.audit_log("—", "Збережено резервну копію ключа головного ПК");
+        crate::logi!("backup of the key for rights saved");
+        Ok(path)
+    }
+
+    /// Makes this PC the main one with a backup of the key for rights.
+    pub fn restore_main_pc(self: &Arc<Self>, bytes: &[u8], password: &str) -> Result<()> {
+        let (private, team_id) = {
+            let st = self.state.read();
+            (model::open_grant_backup(&st.directory, bytes, password)?, st.directory.team_id.clone())
+        };
+        model::store_grant_private(&team_id, &private)?;
+        *self.grant_private.lock() = Some(private.clone());
+        let mut result = Ok(());
+        self.update_directory(|d, _| result = d.move_owner_here(&self.identity, &private));
+        result?;
+        {
+            let mut st = self.state.write();
+            st.lead.grant_backup_saved = true;
+        }
+        self.save();
+        self.audit_log("—", "Головний ПК відновлено з резервної копії ключа");
+        crate::logi!("this PC is the main PC now, restored from a backup of the key");
+        Ok(())
     }
     /// Change team data, store it and send it to every connected PC.
     pub fn update_directory(self: &Arc<Self>, f: impl FnOnce(&mut Directory, &str)) {
@@ -1217,6 +1282,7 @@ pub fn start(identity: Identity, state: LocalState, ui: crate::agent_ui::UiHandl
             leaving: std::sync::atomic::AtomicBool::new(false),
             offered: Mutex::new(HashSet::new()),
             grant_private: Mutex::new(None),
+            grant_tried: std::sync::atomic::AtomicBool::new(false),
             told_revoked: Mutex::new(HashSet::new()),
             secure_peers: Mutex::new(HashMap::new()),
             secure_dialing: Mutex::new(HashSet::new()),
